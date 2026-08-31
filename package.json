@@ -1,0 +1,28 @@
+{
+  "name": "honeypot-bot",
+  "version": "1.0.0",
+  "description": "Discord honeypot bot that catches bots and scammers with a trap channel",
+  "type": "module",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "npm run build && node dist/index.js",
+    "start": "node dist/index.js",
+    "register": "npm run build && node dist/register.js",
+    "deploy": "npm-run-all build register",
+    "test": "npm run build && node --test \"test/**/*.test.js\""
+  },
+  "keywords": ["discord", "bot", "honeypot", "moderation", "anti-spam", "typescript"],
+  "author": "PineFruitDev <contact@pinefruit.dev>",
+  "license": "SEE LICENSE IN LICENSE",
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.9.2"
+  }
+}
