@@ -1,4 +1,10 @@
-import { MessageFlags, SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import {
+  ApplicationIntegrationType,
+  InteractionContextType,
+  MessageFlags,
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction
+} from 'discord.js';
 import { Command, type CommandHelpInfo } from '../core/Command.js';
 
 /**
@@ -7,7 +13,11 @@ import { Command, type CommandHelpInfo } from '../core/Command.js';
 export class PingCommand extends Command {
   public readonly data = new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('Check the bot latency');
+    .setDescription('Check the bot latency')
+    // This bot is only ever added to a server, so nothing is registered for user
+    // installs or DM contexts. Narrower install scopes are part of least privilege too.
+    .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall);
 
   public readonly helpInfo: CommandHelpInfo = {
     name: 'ping',

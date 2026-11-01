@@ -121,6 +121,12 @@ export function actionReportEmbed(opts: {
   failed: boolean;
   /** Softban only: the ban landed but the unban did not, so the member is still banned. */
   unbanFailed?: boolean;
+  /**
+   * Set when nothing was attempted because the bot could not have carried it out. Names
+   * the missing permission or the role that is in the way, so the fix is one trip to
+   * Server Settings rather than a guess at what "failed" meant.
+   */
+  blockedReason?: string;
 }): EmbedBuilder {
   // Both the softban and a real ban wipe 7 days of the offender's messages server wide.
   // Spelling that out stops "kick" from looking like it did less than it did.
@@ -135,15 +141,28 @@ export function actionReportEmbed(opts: {
     {
       name: 'Action taken',
       value: `${actionPastTense(opts.action)}${purgeNote}${
-        opts.failed ? '\n**Failed**, check my Ban Members permission and role position.' : ''
+        opts.failed && !opts.blockedReason
+          ? '\n**Failed**, check my Ban Members permission and role position.'
+          : ''
       }`
     }
   ];
 
+  if (opts.blockedReason) {
+    fields.push({
+      name: 'Nothing was done',
+      value: `${opts.blockedReason}\n\nThey were caught and counted, but no action was applied. Fix that and the next catch will land.`
+    });
+  }
+
   if (opts.escalated) {
     fields.push({
       name: 'Escalation',
-      value: 'Account age under 7 days, so this was escalated to a full ban.'
+      // Past tense only when it actually happened. Saying "was escalated to a full ban"
+      // next to "nothing was done" is the kind of contradiction that costs staff an hour.
+      value: opts.blockedReason
+        ? 'Account age under 7 days, so this would have been escalated to a full ban.'
+        : 'Account age under 7 days, so this was escalated to a full ban.'
     });
   }
 
