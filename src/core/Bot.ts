@@ -10,6 +10,7 @@ import {
 } from 'discord.js';
 import { Command } from './Command.js';
 import { CommandManager } from './CommandManager.js';
+import { evaluateTrapMessage, trapMessageFacts } from './TrapDetection.js';
 import { Logger } from '../services/Logger.js';
 import { GuildConfigStore } from '../services/GuildConfigStore.js';
 import { EnforcementService } from '../services/EnforcementService.js';
@@ -67,27 +68,58 @@ export class Bot {
     });
   }
 
-  /** Anyone who posts in the trap channel is caught. */
+  /**
+   * Anyone who posts in the trap channel is caught.
+   *
+   * Only MessageCreate is wired up. An edit is not a second offence, and the bot's own
+   * deletion of a caught message must not read as one either, so neither MessageUpdate nor
+   * MessageDelete has a listener.
+   */
   private async handleMessage(message: Message): Promise<void> {
     try {
-      if (!message.guild) return;
-      if (message.author.id === this.client.user?.id) return;
-      if (!GuildConfigStore.getInstance()?.isTrapChannel(message.guild.id, message.channelId)) {
+      const store = GuildConfigStore.getInstance();
+      const verdict = evaluateTrapMessage(
+        trapMessageFacts(message),
+        this.client.user?.id,
+        (guildId, channelId) => store?.isTrapChannel(guildId, channelId) ?? false
+      );
+
+      if (!verdict.catch) {
+        if (verdict.deleteMessage) await message.delete().catch(() => {});
+        // Only worth a line for the two that look like a catch and are not, so a staff
+        // member asking "why did nothing happen?" finds the answer in the log.
+        if (verdict.reason === 'discord-member-notice' || verdict.reason === 'posted-by-a-webhook') {
+          this.logger.info(
+            `handleMessage - Took no action in ${message.guildId}: ${verdict.reason}`
+          );
+        }
         return;
       }
 
-      // Delete the message first. Whatever the configured action turns out to be, the
-      // fastest way to blunt a spam flood is to take the payload down immediately.
+      // The verdict only needs the guild's ID, which the payload always carries, but
+      // enforcement needs the guild itself. Resolve it before deleting anything: a guild
+      // missing from the cache during a gateway resume would otherwise lose the message and
+      // the catch both, leaving no trace of either.
+      const guild = message.guild;
+      if (!guild) {
+        this.logger.warn(
+          `handleMessage - ${message.guildId} is not in the cache, leaving the message alone`
+        );
+        return;
+      }
+
+      // Delete first. Whatever the configured action turns out to be, the fastest way to
+      // blunt a spam flood is to take the payload down immediately.
       await message.delete().catch(() => {});
 
       await EnforcementService.handleCatch({
-        guild: message.guild,
+        guild,
         user: message.author,
         member: message.member,
         trigger: 'sent a message in the honeypot channel',
         source: 'message'
       });
-      await EnforcementService.refreshTrap(message.guild);
+      await EnforcementService.refreshTrap(guild);
     } catch (error) {
       this.logger.error('handleMessage - Failed to process a trap message:', error);
     }
