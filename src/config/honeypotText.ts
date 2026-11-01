@@ -6,6 +6,7 @@ import {
   type APIEmbedField
 } from 'discord.js';
 import type { CatchRecord, HoneypotAction } from '../services/GuildConfigStore.js';
+import type { SoftbanBanState } from '../services/DiscordApi.js';
 
 /**
  * Every piece of user-facing copy the trap produces, in one place so it can be reworded
@@ -121,6 +122,14 @@ export function actionReportEmbed(opts: {
   failed: boolean;
   /** Softban only: the ban landed but the unban did not, so the member is still banned. */
   unbanFailed?: boolean;
+  /**
+   * Softban only: whether the leftover ban is a fact or a guess.
+   *
+   * 'still_banned' was confirmed against Discord. 'unknown' means the re-check itself
+   * failed, so the report has to ask staff to look rather than tell them what they will
+   * find. Reporting a guess as a fact is how a report stops being believed.
+   */
+  banState?: SoftbanBanState;
 }): EmbedBuilder {
   // Both the softban and a real ban wipe 7 days of the offender's messages server wide.
   // Spelling that out stops "kick" from looking like it did less than it did.
@@ -148,11 +157,19 @@ export function actionReportEmbed(opts: {
   }
 
   if (opts.unbanFailed) {
-    fields.push({
-      name: 'Softban unban failed',
-      value:
-        'The member is still **banned**. A kick was intended, so lift the ban manually in Server Settings > Bans.'
-    });
+    fields.push(
+      opts.banState === 'unknown'
+        ? {
+            name: 'Softban unban unconfirmed',
+            value:
+              'The unban failed and I could **not verify** whether the ban is still in place. A kick was intended, so check Server Settings > Bans and lift it if it is there.'
+          }
+        : {
+            name: 'Softban unban failed',
+            value:
+              'The member is still **banned**, confirmed. A kick was intended, so lift the ban manually in Server Settings > Bans.'
+          }
+    );
   }
 
   return new EmbedBuilder()
@@ -169,16 +186,47 @@ export function offenderDmEmbed(opts: {
   guildName: string;
   trigger: string;
   escalated: boolean;
+  /**
+   * Set when the action did not finish cleanly. The DM must not tell someone they were
+   * kicked when a leftover ban means they cannot come back, so it says what is actually
+   * known and points them at the server's staff.
+   */
+  banState?: SoftbanBanState;
 }): EmbedBuilder {
   const escalationNote = opts.escalated
     ? ' Accounts under 7 days old are banned rather than removed.'
     : '';
+  const unresolvedNote =
+    opts.action === 'kick' && opts.banState && opts.banState !== 'lifted'
+      ? '\n\nA removal here is carried out as a temporary ban that is lifted immediately. Lifting it did not complete, so you may still be banned. If you believe this was a mistake, contact the server staff.'
+      : '';
   return new EmbedBuilder()
     .setColor(ACCENT)
     .setTitle(`You were ${actionPastTense(opts.action).toLowerCase()} in ${opts.guildName}`)
     .setDescription(
-      `You ${opts.trigger} in **${opts.guildName}**. That channel is a honeypot trap for bots and scammers, so the action was automatic.${escalationNote}`
+      `You ${opts.trigger} in **${opts.guildName}**. That channel is a honeypot trap for bots and scammers, so the action was automatic.${escalationNote}${unresolvedNote}`
     );
+}
+
+/**
+ * An operational alert for the log channel: something the bot could not finish on its own.
+ *
+ * Separate from the action report because it is not about a catch. It is the bot telling
+ * staff that it owes somebody an unban it could not complete, which is the one failure here
+ * that leaves a real person locked out of a server.
+ */
+export function operationalAlertEmbed(opts: {
+  title: string;
+  description: string;
+  fields?: APIEmbedField[];
+}): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(ACCENT)
+    .setTitle(`Honeypot: ${opts.title}`)
+    .setDescription(opts.description)
+    .setTimestamp();
+  if (opts.fields?.length) embed.addFields(opts.fields);
+  return embed;
 }
 
 /** The ephemeral stats view behind the counter button. */

@@ -77,22 +77,26 @@ export class Environment {
     return /^\d{17,20}$/.test(id);
   }
 
+  /**
+   * Log what was configured, never any of it verbatim.
+   *
+   * There is deliberately no masked token here. A masked token still publishes the first
+   * and last characters of a live credential into every log aggregator, support ticket and
+   * pasted screenshot the logs ever reach, and it buys nothing: "the token is present and
+   * the right shape" is the only fact startup actually needs to report. The client ID is
+   * public by design (it is in the bot's own invite URL), so it stays.
+   */
   private static logEnvironmentInfo(): void {
-    this.logger.info(`validate - Environment: ${process.env.NODE_ENV}`);
-    this.logger.info(`validate - Discord Client ID: ${process.env.DISCORD_CLIENT_ID}`);
-    this.logger.info(`validate - Discord Token: ${this.maskToken(process.env.DISCORD_TOKEN!)}`);
-    this.logger.info(`validate - Data directory: ${process.env.DATA_DIR}`);
-
-    if (process.env.DEVELOPER_IDS) {
-      const count = process.env.DEVELOPER_IDS.split(',').filter(id => id.trim()).length;
-      this.logger.info(`validate - Developer IDs configured: ${count}`);
-    }
-  }
-
-  /** Never log a whole token, not even at debug level. */
-  private static maskToken(token: string): string {
-    if (token.length < 10) return '***';
-    return `${token.substring(0, 6)}***${token.substring(token.length - 4)}`;
+    this.logger.info('validate - Environment configured', {
+      nodeEnv: process.env.NODE_ENV,
+      discordClientId: process.env.DISCORD_CLIENT_ID,
+      discordToken: 'present',
+      dataDir: process.env.DATA_DIR,
+      developerIds: process.env.DEVELOPER_IDS
+        ? process.env.DEVELOPER_IDS.split(',').filter(id => id.trim()).length
+        : 0,
+      registerOnBoot: process.env.REGISTER_ON_BOOT
+    });
   }
 
   public static getConfig() {
