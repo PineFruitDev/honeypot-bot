@@ -144,9 +144,11 @@ export class EnforcementService {
       source,
       caughtAt: new Date().toISOString()
     });
-    this.logger.info(
-      `handleCatch - ${user.tag} (${user.id}) caught in ${guild.id}: ${finalAction}, total ${total}`
-    );
+    // Ids, not tags. A display name is user-authored text and has no place in stdout; the
+    // user id correlates the catch with the audit record and the report embed anyway.
+    this.logger
+      .child({ event: 'catch', guildId: guild.id, userId: user.id, action: finalAction, escalated, source, total })
+      .info('handleCatch - Caught');
 
     // A courtesy, and best effort by design. Opening a DM channel with someone who has
     // just been banned usually fails unless one already existed, which for a throwaway

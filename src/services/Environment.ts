@@ -1,4 +1,4 @@
-import { Logger } from './Logger.js';
+import { Logger, resolveLevel } from './Logger.js';
 
 /**
  * Environment validation. Catches a bad or missing token at startup with a clear message,
@@ -78,21 +78,20 @@ export class Environment {
   }
 
   private static logEnvironmentInfo(): void {
-    this.logger.info(`validate - Environment: ${process.env.NODE_ENV}`);
-    this.logger.info(`validate - Discord Client ID: ${process.env.DISCORD_CLIENT_ID}`);
-    this.logger.info(`validate - Discord Token: ${this.maskToken(process.env.DISCORD_TOKEN!)}`);
-    this.logger.info(`validate - Data directory: ${process.env.DATA_DIR}`);
-
-    if (process.env.DEVELOPER_IDS) {
-      const count = process.env.DEVELOPER_IDS.split(',').filter(id => id.trim()).length;
-      this.logger.info(`validate - Developer IDs configured: ${count}`);
-    }
-  }
-
-  /** Never log a whole token, not even at debug level. */
-  private static maskToken(token: string): string {
-    if (token.length < 10) return '***';
-    return `${token.substring(0, 6)}***${token.substring(token.length - 4)}`;
+    this.logger
+      .child({
+        nodeEnv: process.env.NODE_ENV,
+        logLevel: resolveLevel(),
+        // The client id is public, so it earns its place as a correlation field. The token
+        // does not appear at all: that it validated is the only part worth logging.
+        discordClientId: process.env.DISCORD_CLIENT_ID,
+        dataDir: process.env.DATA_DIR,
+        tokenPresent: true,
+        developerIds: process.env.DEVELOPER_IDS
+          ? process.env.DEVELOPER_IDS.split(',').filter(id => id.trim()).length
+          : 0
+      })
+      .info('validate - Startup configuration');
   }
 
   public static getConfig() {

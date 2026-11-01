@@ -56,6 +56,8 @@ DEVELOPER_IDS=your_user_id_here  # Optional
 NODE_ENV=development             # Optional
 DATA_DIR=data                    # Optional
 REGISTER_ON_BOOT=true            # Optional
+LOG_LEVEL=info                   # Optional
+LOG_FORMAT=text                  # Optional
 ```
 
 > **Required Discord setup:** invite the bot with **Manage Channels**, **Manage Roles**, **Ban Members**, **Moderate Members**, **View Channels** and **Send Messages**, and place its role **above** the members it will be acting on. No privileged intents are needed.
@@ -152,6 +154,21 @@ src/
 | `NODE_ENV` | ❌ | Environment mode (defaults to production) |
 | `DATA_DIR` | ❌ | Where per-guild trap config is persisted (defaults to `data`) |
 | `REGISTER_ON_BOOT` | ❌ | Register slash commands on startup (defaults to true) |
+| `LOG_LEVEL` | ❌ | `debug`, `info`, `warn`, `error` or `silent` (defaults to `info`, or `debug` when `NODE_ENV=development`) |
+| `LOG_FORMAT` | ❌ | `text` or `json` (defaults to `text`; `json` emits one object per line for a log shipper) |
+
+## Logging
+
+Every line the bot prints goes through one logger, which is what makes two guarantees hold:
+
+- **The token never reaches stdout.** The configured token is matched literally, and anything token-shaped, any `Authorization` header and any webhook token is scrubbed as well, including out of an error's stack.
+- **Message content never reaches stdout.** The bot does not request the Message Content intent, and even where text is available it is logged as a length and a per-process hash. Identical payloads hash alike while the bot is up, so a flood repeating one message is visible without the message being stored anywhere.
+
+Each event is tagged with its correlation ids (guild, channel, message or interaction, user), on every line it produces including the ones written from a `catch`, so one catch can be followed end to end in an aggregator:
+
+```
+[2026-11-01T12:00:00.000Z] [INFO] [Bot] handleMessage - Caught {event=message guildId=… channelId=… messageId=… userId=…}
+```
 
 ## Notes
 

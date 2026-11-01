@@ -10,7 +10,7 @@ import {
 } from 'discord.js';
 import { Command } from './Command.js';
 import { CommandManager } from './CommandManager.js';
-import { Logger } from '../services/Logger.js';
+import { Logger, interactionCorrelation, messageCorrelation } from '../services/Logger.js';
 import { GuildConfigStore } from '../services/GuildConfigStore.js';
 import { EnforcementService } from '../services/EnforcementService.js';
 import { HoneypotService } from '../services/HoneypotService.js';
@@ -69,12 +69,21 @@ export class Bot {
 
   /** Anyone who posts in the trap channel is caught. */
   private async handleMessage(message: Message): Promise<void> {
+    // Stays the plain logger until the guards have passed, so the common case (a message in
+    // a channel that is not a trap) costs nothing. From the trap hit onwards every line,
+    // including the one in the catch block, carries the same ids.
+    let log = this.logger;
     try {
       if (!message.guild) return;
       if (message.author.id === this.client.user?.id) return;
       if (!GuildConfigStore.getInstance()?.isTrapChannel(message.guild.id, message.channelId)) {
         return;
       }
+
+      log = this.logger.child(messageCorrelation(message));
+      // The content field is a digest, never the text. The bot does not hold the Message
+      // Content intent, so in production this records only that something was posted.
+      log.debug('handleMessage - Trap hit', { content: message.content });
 
       // Delete the message first. Whatever the configured action turns out to be, the
       // fastest way to blunt a spam flood is to take the payload down immediately.
@@ -89,7 +98,7 @@ export class Bot {
       });
       await EnforcementService.refreshTrap(message.guild);
     } catch (error) {
-      this.logger.error('handleMessage - Failed to process a trap message:', error);
+      log.error('handleMessage - Failed to process a trap message:', error);
     }
   }
 
@@ -98,6 +107,8 @@ export class Bot {
     const store = GuildConfigStore.getInstance();
     const config = store?.getGuild(interaction.guild.id);
     if (!store || !config) return;
+
+    const log = this.logger.child(interactionCorrelation(interaction));
 
     try {
       switch (interaction.customId) {
@@ -149,7 +160,7 @@ export class Bot {
         }
       }
     } catch (error) {
-      this.logger.error(`handleButton - Failed handling ${interaction.customId}:`, error);
+      log.error('handleButton - Failed handling the press:', error);
     }
   }
 
@@ -176,7 +187,9 @@ export class Bot {
         flags: MessageFlags.Ephemeral
       });
     } catch (error) {
-      this.logger.error(`handleHide - Could not add the hide role for ${interaction.user.id}:`, error);
+      this.logger
+        .child(interactionCorrelation(interaction))
+        .error('handleHide - Could not add the hide role:', error);
       await interaction
         .reply({
           content: "I couldn't hide the channel. Ask an admin to check my Manage Roles permission.",
@@ -189,18 +202,18 @@ export class Bot {
   private async handleCommand(interaction: Interaction): Promise<void> {
     if (!interaction.isChatInputCommand()) return;
 
+    const log = this.logger.child(interactionCorrelation(interaction));
+
     const command = this.commandManager.getCommand(interaction.commandName);
     if (!command) {
-      this.logger.warn(`handleCommand - Unknown command: ${interaction.commandName}`);
+      log.warn('handleCommand - Unknown command');
       return;
     }
 
     try {
       const validation = await command.validate(interaction);
       if (!validation.valid) {
-        this.logger.warn(
-          `handleCommand - Validation failed for ${interaction.commandName}: ${validation.reason}`
-        );
+        log.warn(`handleCommand - Validation failed: ${validation.reason}`);
         await interaction.reply({
           content: `❌ ${validation.reason}`,
           flags: MessageFlags.Ephemeral
@@ -209,11 +222,9 @@ export class Bot {
       }
 
       await command.execute(interaction, process.env);
-      this.logger.info(
-        `handleCommand - Executed ${interaction.commandName} for ${interaction.user.tag}`
-      );
+      log.info('handleCommand - Executed');
     } catch (error) {
-      this.logger.error(`handleCommand - Error executing ${interaction.commandName}:`, error);
+      log.error('handleCommand - Error executing the command:', error);
 
       const errorMessage = '❌ An error occurred while running that command.';
       if (interaction.replied || interaction.deferred) {
@@ -241,9 +252,9 @@ export class Bot {
 
       const channel = guild.channels.cache.get(config.channelId);
       if (!channel || channel.type !== ChannelType.GuildText) {
-        this.logger.warn(
-          `reconcileOnBoot - Trap channel ${config.channelId} is gone in ${guildId}, clearing the config`
-        );
+        this.logger
+          .child({ event: 'reconcile', guildId, channelId: config.channelId })
+          .warn('reconcileOnBoot - Trap channel is gone, clearing the config');
         await store.removeGuild(guildId);
         continue;
       }
