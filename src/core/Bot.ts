@@ -8,6 +8,7 @@ import {
   type Interaction,
   type Message
 } from 'discord.js';
+import { AbuseGuard } from '../services/AbuseGuard.js';
 import { Command } from './Command.js';
 import { CommandManager } from './CommandManager.js';
 import { Logger } from '../services/Logger.js';
@@ -21,6 +22,7 @@ import { BUTTON_IDS, statsEmbed } from '../config/honeypotText.js';
  * runs on: a message in the trap channel and a press on one of its buttons.
  */
 export class Bot {
+  private guard = new AbuseGuard();
   private logger = new Logger({ context: 'Bot' });
   private client: Client;
   private commandManager: CommandManager;
@@ -69,6 +71,7 @@ export class Bot {
 
   /** Anyone who posts in the trap channel is caught. */
   private async handleMessage(message: Message): Promise<void> {
+    let release: (() => void) | null = null;
     try {
       if (!message.guild) return;
       if (message.author.id === this.client.user?.id) return;
@@ -76,8 +79,11 @@ export class Bot {
         return;
       }
 
-      // Delete the message first. Whatever the configured action turns out to be, the
-      // fastest way to blunt a spam flood is to take the payload down immediately.
+      release = this.guard.acquire(message.guild.id, message.author.id, message.id);
+      if (!release) return;
+      const config = GuildConfigStore.getInstance()?.getGuild(message.guild.id);
+      if (!config || await EnforcementService.isExempt(message.guild, message.author,
+        message.member, config.exemptUserIds, config.exemptRoleIds)) return;
       await message.delete().catch(() => {});
 
       await EnforcementService.handleCatch({
@@ -90,7 +96,7 @@ export class Bot {
       await EnforcementService.refreshTrap(message.guild);
     } catch (error) {
       this.logger.error('handleMessage - Failed to process a trap message:', error);
-    }
+    } finally { release?.(); }
   }
 
   private async handleButton(interaction: Interaction): Promise<void> {
@@ -98,7 +104,10 @@ export class Bot {
     const store = GuildConfigStore.getInstance();
     const config = store?.getGuild(interaction.guild.id);
     if (!store || !config) return;
+    if (interaction.channelId !== config.channelId || interaction.message.id !== config.messageId) return;
 
+    const release = this.guard.acquire(interaction.guild.id, interaction.user.id, interaction.id);
+    if (!release) return;
     try {
       switch (interaction.customId) {
         case BUTTON_IDS.hide:
@@ -150,7 +159,7 @@ export class Bot {
       }
     } catch (error) {
       this.logger.error(`handleButton - Failed handling ${interaction.customId}:`, error);
-    }
+    } finally { release(); }
   }
 
   /** Give the presser the hide role, so the trap disappears from their channel list. */
@@ -195,6 +204,8 @@ export class Bot {
       return;
     }
 
+    const release = interaction.guildId ? this.guard.acquire(interaction.guildId, interaction.user.id, interaction.id) : null;
+    if (interaction.guildId && !release) return;
     try {
       const validation = await command.validate(interaction);
       if (!validation.valid) {
@@ -221,7 +232,7 @@ export class Bot {
       } else {
         await interaction.reply({ content: errorMessage, flags: MessageFlags.Ephemeral }).catch(() => {});
       }
-    }
+    } finally { release?.(); }
   }
 
   /**

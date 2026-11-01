@@ -81,6 +81,7 @@ export class DiscordApi {
     try {
       const res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
         method: 'PUT',
+        signal: AbortSignal.timeout(10000),
         headers: { ...this.jsonHeaders(), 'X-Audit-Log-Reason': this.auditReason(reason) },
         body: JSON.stringify({
           delete_message_seconds: Math.max(0, Math.min(deleteMessageSeconds, 604800))
@@ -102,6 +103,7 @@ export class DiscordApi {
     try {
       res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
         method: 'DELETE',
+        signal: AbortSignal.timeout(10000),
         headers: this.authHeaders()
       });
     } catch (error) {
@@ -159,6 +161,7 @@ export class DiscordApi {
   public static async isMemberBanned(guildId: string, userId: string): Promise<boolean | null> {
     try {
       const res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
+        signal: AbortSignal.timeout(10000),
         headers: this.authHeaders()
       });
       if (res.status === 404) return false; // no ban record, so not banned
@@ -200,13 +203,16 @@ export class DiscordApi {
         return { unbanFailed: false, detail };
       }
 
-      if (attempt === UNBAN_ATTEMPTS) break;
+      if (attempt === UNBAN_ATTEMPTS || result.result === 'missing_perms') break;
       // Wait out Discord's own retry_after when it gave one, otherwise back off gently.
       // Bounded overall so a member is never left banned while the bot sleeps on a
       // rate limit that is not clearing.
       const asked =
         result.retryAfter !== undefined ? Math.ceil(result.retryAfter * 1000) : 250 * attempt;
-      const waitMs = Math.min(asked, UNBAN_TOTAL_WAIT_BUDGET_MS - waited);
+      if (asked > UNBAN_TOTAL_WAIT_BUDGET_MS - waited) {
+        return { unbanFailed: true, detail: detail + '; retry delay exceeds immediate budget; staff recovery required' };
+      }
+      const waitMs = asked;
       if (waitMs <= 0) break; // budget spent
       waited += waitMs;
       await sleep(waitMs);

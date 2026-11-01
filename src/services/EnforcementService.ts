@@ -172,7 +172,7 @@ export class EnforcementService {
    * Other moderators are protected by Discord's own role hierarchy: an action against
    * someone above the bot fails loudly rather than silently, which is the behaviour we want.
    */
-  private static async isExempt(
+  public static async isExempt(
     guild: Guild,
     user: User,
     member: GuildMember | null,
@@ -185,7 +185,8 @@ export class EnforcementService {
 
     if (exemptRoleIds?.length) {
       const resolved = member ?? (await guild.members.fetch(user.id).catch(() => null));
-      if (resolved && exemptRoleIds.some(roleId => resolved.roles.cache.has(roleId))) {
+      if (!resolved) return true; // Unknown role evidence must not bypass the allowlist.
+      if (exemptRoleIds.some(roleId => resolved.roles.cache.has(roleId))) {
         return true;
       }
     }
