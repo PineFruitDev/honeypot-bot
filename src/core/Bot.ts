@@ -62,6 +62,13 @@ export class Bot {
       }
     });
 
+    this.client.on(Events.GuildDelete, guild => {
+      if (guild.available === false) return;
+      void GuildConfigStore.getInstance()?.removeGuild(guild.id).catch(() => {
+        this.logger.error('Guild departure cleanup failed; retry on next startup');
+      });
+    });
+
     this.client.on(Events.Error, error => {
       this.logger.error('setupEventListeners - Discord client error:', error);
     });
@@ -237,7 +244,8 @@ export class Bot {
 
     for (const { guildId, config } of store.getAllGuilds()) {
       const guild = this.client.guilds.cache.get(guildId);
-      if (!guild) continue; // bot is no longer in that server; leave the record alone
+      if (!guild) { await store.removeGuild(guildId); continue; }
+      if (!guild.available) continue;
 
       const channel = guild.channels.cache.get(config.channelId);
       if (!channel || channel.type !== ChannelType.GuildText) {
@@ -263,6 +271,7 @@ export class Bot {
   public async stop(): Promise<void> {
     this.logger.info('stop - Shutting down bot...');
     await this.client.destroy();
+    await GuildConfigStore.getInstance()?.drain();
   }
 
   public getCommandManager(): CommandManager {
