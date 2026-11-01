@@ -13,7 +13,7 @@ export class Environment {
     NODE_ENV: 'production',
     DEVELOPER_IDS: '',
     DATA_DIR: 'data',
-    REGISTER_ON_BOOT: 'true'
+    DEV_GUILD_ID: ''
   } as const;
 
   public static validate(): void {
@@ -54,6 +54,17 @@ export class Environment {
       }
     }
 
+    if (process.env.DEV_GUILD_ID && !this.isValidDiscordId(process.env.DEV_GUILD_ID)) {
+      invalid.push('DEV_GUILD_ID (invalid format)');
+    }
+
+    if (process.env.REGISTER_ON_BOOT) {
+      this.logger.warn(
+        'validate - REGISTER_ON_BOOT is set but no longer does anything. Commands are never registered on ' +
+        'boot; run `npm run register` as a release step instead.'
+      );
+    }
+
     if (missing.length > 0) {
       this.logger.error(`validate - Missing required environment variables: ${missing.join(', ')}`);
       throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -83,6 +94,17 @@ export class Environment {
     this.logger.info(`validate - Discord Token: ${this.maskToken(process.env.DISCORD_TOKEN!)}`);
     this.logger.info(`validate - Data directory: ${process.env.DATA_DIR}`);
 
+    if (process.env.NODE_ENV === 'production') {
+      this.logger.info('validate - Command registration target: global (NODE_ENV=production)');
+    } else if (process.env.DEV_GUILD_ID) {
+      this.logger.info(`validate - Command registration target: guild ${process.env.DEV_GUILD_ID}`);
+    } else {
+      this.logger.warn(
+        `validate - NODE_ENV is "${process.env.NODE_ENV}" and DEV_GUILD_ID is unset, so \`npm run register\` ` +
+        'has no target. Set DEV_GUILD_ID to register to a test guild.'
+      );
+    }
+
     if (process.env.DEVELOPER_IDS) {
       const count = process.env.DEVELOPER_IDS.split(',').filter(id => id.trim()).length;
       this.logger.info(`validate - Developer IDs configured: ${count}`);
@@ -101,7 +123,7 @@ export class Environment {
       discordClientId: process.env.DISCORD_CLIENT_ID!,
       nodeEnv: process.env.NODE_ENV!,
       dataDir: process.env.DATA_DIR || 'data',
-      registerOnBoot: (process.env.REGISTER_ON_BOOT || 'true').toLowerCase() !== 'false',
+      devGuildId: process.env.DEV_GUILD_ID || undefined,
       developerIds:
         process.env.DEVELOPER_IDS?.split(',')
           .map(id => id.trim())

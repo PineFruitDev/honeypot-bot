@@ -55,18 +55,32 @@ DISCORD_CLIENT_ID=your_bot_client_id_here
 DEVELOPER_IDS=your_user_id_here  # Optional
 NODE_ENV=development             # Optional
 DATA_DIR=data                    # Optional
-REGISTER_ON_BOOT=true            # Optional
+DEV_GUILD_ID=your_test_guild_id  # Optional, but required to register commands outside production
 ```
 
 > **Required Discord setup:** invite the bot with **Manage Channels**, **Manage Roles**, **Ban Members**, **Moderate Members**, **View Channels** and **Send Messages**, and place its role **above** the members it will be acting on. No privileged intents are needed.
 
-### 3. Deploy
+### 3. Register the commands
+
+Starting the bot does not register anything. Registration is a separate step, because it is a bulk
+overwrite: it replaces the whole command set for whatever it is pointed at.
 
 ```bash
-npm run dev        # Build and start; commands register themselves on boot
+npm run register -- --guild          # Your DEV_GUILD_ID, visible immediately, only there
+npm run register -- --dry-run        # Print what would change, call nothing
+npm run register                     # The target NODE_ENV implies: global in production
 ```
 
-### 4. Arm the trap
+With `NODE_ENV=production` the default target is global, which is every server the bot is in. With
+anything else it is `DEV_GUILD_ID`, and the script refuses to run rather than quietly going global.
+
+### 4. Deploy
+
+```bash
+npm run dev        # Build and start
+```
+
+### 5. Arm the trap
 
 ```
 /honeypot setup
@@ -124,13 +138,13 @@ src/
 │   ├── EnforcementService.ts   # ← Catch → action → record → report
 │   ├── DiscordApi.ts           # Ban/unban REST, softban retry logic
 │   ├── GuildConfigStore.ts     # Per-guild config + catch history
-│   ├── CommandRegistrar.ts     # Boot-time command registration
+│   ├── CommandRegistrar.ts     # Global/guild command registration, per-target fingerprints
 │   ├── Environment.ts          # Config validation
 │   └── Logger.ts               # Contextual logging
 ├── config/
 │   └── honeypotText.ts         # ← All user-facing copy and embeds
 ├── index.ts                    # Entry point
-└── register.ts                 # Manual command registration
+└── register.ts                 # Command registration CLI
 ```
 
 ## Scripts
@@ -138,9 +152,37 @@ src/
 - `npm run build` - Compile TypeScript
 - `npm run dev` - Build and run
 - `npm run start` - Start production server
-- `npm run register` - Force command registration with Discord
-- `npm run deploy` - Build, register, and start
+- `npm run register` - Register commands with Discord (see below)
 - `npm test` - Run the test suite
+
+## Registering commands
+
+Nothing registers commands on boot. A restart does not change what Discord has, so a host that
+redeploys on its own schedule cannot push a half-finished command set to every server.
+
+```bash
+npm run register -- --guild              # DEV_GUILD_ID, or --guild <id>
+npm run register -- --global --dry-run   # Review the diff before a release
+npm run register -- --global             # Every installation
+npm run register -- --force              # Re-send even if the fingerprint matches
+npm run register -- --clear --guild      # Remove the test guild's commands
+npm run register -- --rollback --global  # Re-send the payload global held before
+```
+
+- **Idempotent.** The payload is fingerprinted per application and per target, so re-running against
+  an unchanged command set sends nothing. The dev guild's fingerprint never makes global look up to
+  date, and vice versa
+- **Bulk overwrite.** A command dropped from `ALL_COMMANDS` is dropped from the target. `--dry-run`
+  names what would be added, edited and removed, and the global path prints that plan before it
+  sends
+- **Resync with `--force`.** The fingerprint records what this bot last sent, not what Discord
+  currently holds. Commands edited in the portal or registered from another machine are invisible to
+  it
+- **Clear the dev guild when you are done with it.** Guild commands shadow the global ones of the
+  same name, so a stale test registration keeps serving an old build to the one server most likely
+  to be checking the new one
+- The previous payload for each target is retained in `DATA_DIR/commands.json` for `--rollback`. Back
+  that file up with the rest of `DATA_DIR`
 
 ## Environment Variables
 
@@ -149,9 +191,9 @@ src/
 | `DISCORD_TOKEN` | ✅ | Bot token from Discord Developer Portal |
 | `DISCORD_CLIENT_ID` | ✅ | Bot client ID from Discord Developer Portal |
 | `DEVELOPER_IDS` | ❌ | Comma-separated user IDs for developer commands |
-| `NODE_ENV` | ❌ | Environment mode (defaults to production) |
-| `DATA_DIR` | ❌ | Where per-guild trap config is persisted (defaults to `data`) |
-| `REGISTER_ON_BOOT` | ❌ | Register slash commands on startup (defaults to true) |
+| `NODE_ENV` | ❌ | Environment mode (defaults to production); also picks the default command registration target |
+| `DATA_DIR` | ❌ | Where per-guild trap config and registration state are persisted (defaults to `data`) |
+| `DEV_GUILD_ID` | ❌ | Test guild for command registration when `NODE_ENV` is not `production` |
 
 ## Notes
 
