@@ -290,6 +290,8 @@ See the LICENSE file for the full text.
 
 See [the release checklist](docs/release.md) for deployment prerequisites and verified limits.
 The bot does not read message bodies for detection and requests no Message Content intent.
+Discord can still deliver text under its mention and other exceptions, and discord.js may
+cache received messages in memory; no message-cache TTL is configured.
 It does retain guild settings, Discord identifiers, up to 50 recent catch records per guild
 (including user tags, action, source and time), lifetime counters, and unresolved softban
 recovery records. Logs contain correlation identifiers. Removing a guild deletes its live

@@ -60,7 +60,13 @@ new grants and a new hosting service are separate operations.
 ## Privacy facts for the product page
 
 Detection reads event metadata, not message bodies. Only Guilds and GuildMessages intents
-are requested. Stored records include guild/channel/role/user IDs, user tags, action/source
+are requested. This does not prevent all text receipt: Discord can deliver content for
+messages mentioning the bot and other documented exceptions. The default discord.js client
+may cache received message objects in memory (up to 200 per channel in the locked library,
+without a configured message TTL). Conversion checks fetch up to 20 recent messages.
+No application storage path intentionally writes message bodies; transient receipt and
+library caching are distinct from the persistent records below. See [Discord's intent
+exceptions](https://docs.discord.com/developers/gateway/you-might-not-need-a-privileged-intent). Stored records include guild/channel/role/user IDs, user tags, action/source
 and timestamps, recent catch history (50 per guild), lifetime counters, registration payloads,
 and pending recovery evidence. Live guild settings/history are removed on departure;
 backups and unresolved recovery evidence can outlive departure. Host log and external
