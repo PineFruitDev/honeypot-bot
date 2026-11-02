@@ -17,7 +17,7 @@ import { AbuseGuard } from '../services/AbuseGuard.js';
 import { REQUIRED_INTENTS, assertLeastPrivilegeIntents, describeIntents } from './intents.js';
 import { evaluateTrapMessage, trapMessageFacts } from './TrapDetection.js';
 import { roleHierarchyIssue, missingGuildPermissions } from '../services/BotPermissions.js';
-import { Logger, newCorrelationId } from '../services/Logger.js';
+import { Logger, newCorrelationId, messageCorrelation, interactionCorrelation } from '../services/Logger.js';
 import { GuildConfigStore } from '../services/GuildConfigStore.js';
 import { EnforcementService } from '../services/EnforcementService.js';
 import { HoneypotService } from '../services/HoneypotService.js';
@@ -184,6 +184,7 @@ export class Bot {
   /** Anyone who posts in the trap channel is caught. */
   private async handleMessage(message: Message): Promise<void> {
     const correlationId = newCorrelationId();
+    const log = this.logger.child({ ...messageCorrelation(message), correlationId });
     let release: (() => void) | null = null;
     try {
       const store = GuildConfigStore.getInstance();
@@ -198,7 +199,7 @@ export class Bot {
         // Only worth a line for the two that look like a catch and are not, so a staff
         // member asking "why did nothing happen?" finds the answer in the log.
         if (verdict.reason === 'discord-member-notice' || verdict.reason === 'posted-by-a-webhook') {
-          this.logger.info(
+          log.info(
             `handleMessage - Took no action in ${message.guildId}: ${verdict.reason}`
           );
         }
@@ -211,7 +212,7 @@ export class Bot {
       // the catch both, leaving no trace of either.
       const guild = message.guild;
       if (!guild) {
-        this.logger.warn(
+        log.warn(
           `handleMessage - ${message.guildId} is not in the cache, leaving the message alone`
         );
         return;
@@ -234,7 +235,7 @@ export class Bot {
       });
       await EnforcementService.refreshTrap(guild);
     } catch (error) {
-      this.logger.error('handleMessage - Failed to process a trap message:', error);
+      log.error('handleMessage - Failed to process a trap message:', error);
     } finally { release?.(); }
   }
 

@@ -57,6 +57,8 @@ DEVELOPER_IDS=your_user_id_here  # Optional
 NODE_ENV=development             # Optional
 DATA_DIR=data                    # Optional
 DEV_GUILD_ID=your_test_guild_id  # Optional, but required to register commands outside production
+LOG_LEVEL=info                   # Optional
+LOG_FORMAT=text                  # Optional
 ```
 
 > **Required Discord setup:** invite the bot with the scopes and permissions in [Permissions and intents](#permissions-and-intents), and place its role **above** the members it will be acting on. No privileged intents are needed, and the bot never asks for Administrator.
@@ -240,6 +242,21 @@ npm run register -- --rollback --global  # Re-send the payload global held befor
 | `NODE_ENV` | ❌ | Environment mode (defaults to production); also picks the default command registration target |
 | `DATA_DIR` | ❌ | Where per-guild trap config and registration state are persisted (defaults to `data`) |
 | `DEV_GUILD_ID` | ❌ | Test guild for command registration when `NODE_ENV` is not `production` |
+| `LOG_LEVEL` | ❌ | `debug`, `info`, `warn`, `error` or `silent` (defaults to `info`, or `debug` when `NODE_ENV=development`) |
+| `LOG_FORMAT` | ❌ | `text` or `json` (defaults to `text`; `json` emits one object per line for a log shipper) |
+
+## Logging
+
+Every line the bot prints goes through one logger, which is what makes two guarantees hold:
+
+- **The token never reaches stdout.** The configured token is matched literally, and anything token-shaped, any `Authorization` header and any webhook token is scrubbed as well, including out of an error's stack.
+- **Message content never reaches stdout.** The bot does not request the Message Content intent, and even where text is available it is logged as a length and a per-process hash. Identical payloads hash alike while the bot is up, so a flood repeating one message is visible without the message being stored anywhere.
+
+Each event is tagged with its correlation ids (guild, channel, message or interaction, user), on every line it produces including the ones written from a `catch`, so one catch can be followed end to end in an aggregator:
+
+```
+[2026-11-01T12:00:00.000Z] [INFO] [Bot] handleMessage - Caught {event=message guildId=… channelId=… messageId=… userId=…}
+```
 
 ## Notes
 
