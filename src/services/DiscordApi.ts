@@ -42,7 +42,7 @@ export class DiscordApi {
   private static logger = new Logger({ context: 'DiscordApi' });
 
   private static token(): string {
-    const token = process.env.DISCORD_TOKEN;
+    const token = process.env.DISCORD_TOKEN?.trim();
     if (!token) throw new Error('DISCORD_TOKEN is not set');
     return token;
   }
@@ -81,6 +81,7 @@ export class DiscordApi {
     try {
       const res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
         method: 'PUT',
+        signal: AbortSignal.timeout(10000),
         headers: { ...this.jsonHeaders(), 'X-Audit-Log-Reason': this.auditReason(reason) },
         body: JSON.stringify({
           delete_message_seconds: Math.max(0, Math.min(deleteMessageSeconds, 604800))
@@ -102,6 +103,7 @@ export class DiscordApi {
     try {
       res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
         method: 'DELETE',
+        signal: AbortSignal.timeout(10000),
         headers: this.authHeaders()
       });
     } catch (error) {
@@ -124,7 +126,7 @@ export class DiscordApi {
       const body = (await res.json()) as { code?: number; message?: string; retry_after?: number };
       if (typeof body?.code === 'number') code = body.code;
       if (typeof body?.message === 'string') message = body.message.slice(0, 200);
-      if (typeof body?.retry_after === 'number') retryAfter = body.retry_after;
+      if (typeof body?.retry_after === 'number' && Number.isFinite(body.retry_after) && body.retry_after > 0) retryAfter = body.retry_after;
     } catch {
       // Empty or non-JSON body. The status alone still beats a bare "error".
     }
@@ -159,6 +161,7 @@ export class DiscordApi {
   public static async isMemberBanned(guildId: string, userId: string): Promise<boolean | null> {
     try {
       const res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
+        signal: AbortSignal.timeout(10000),
         headers: this.authHeaders()
       });
       if (res.status === 404) return false; // no ban record, so not banned
@@ -167,6 +170,31 @@ export class DiscordApi {
     } catch {
       return null;
     }
+  }
+
+  /** Ban reason proves recovery belongs to this journal entry, not a later staff ban. */
+  public static async banReason(guildId: string, userId: string): Promise<string | null> {
+    try {
+      const res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
+        signal: AbortSignal.timeout(10000), headers: this.authHeaders()
+      });
+      if (!res.ok) return null;
+      const body = await res.json() as { reason?: unknown };
+      return typeof body.reason === 'string' ? body.reason : null;
+    } catch { return null; }
+  }
+
+  /**
+   * What the ban looks like after a softban attempt finished.
+   *
+   * Kept separate from `unbanFailed` because "still banned" and "could not tell" are
+   * different things to put in front of staff: one is a fact to act on, the other is a
+   * check to perform. Collapsing them into a single failure flag means the report either
+   * overclaims or underclaims, and both erode trust in it.
+   */
+  public static banStateFromRecheck(stillBanned: boolean | null): SoftbanBanState {
+    if (stillBanned === false) return 'lifted';
+    return stillBanned === true ? 'still_banned' : 'unknown';
   }
 
   /**
@@ -187,7 +215,7 @@ export class DiscordApi {
   public static async softbanUnban(
     guildId: string,
     userId: string
-  ): Promise<{ unbanFailed: boolean; detail: string }> {
+  ): Promise<SoftbanUnbanOutcome> {
     let waited = 0;
     let detail = 'no attempt made';
 
@@ -197,16 +225,19 @@ export class DiscordApi {
       // "not_banned" is the 404 case: there is no ban record to delete, which is the
       // state a softban is trying to reach anyway.
       if (result.result === 'success' || result.result === 'not_banned') {
-        return { unbanFailed: false, detail };
+        return { unbanFailed: false, banState: 'lifted', detail };
       }
 
-      if (attempt === UNBAN_ATTEMPTS) break;
+      if (attempt === UNBAN_ATTEMPTS || result.result === 'missing_perms') break;
       // Wait out Discord's own retry_after when it gave one, otherwise back off gently.
       // Bounded overall so a member is never left banned while the bot sleeps on a
       // rate limit that is not clearing.
       const asked =
         result.retryAfter !== undefined ? Math.ceil(result.retryAfter * 1000) : 250 * attempt;
-      const waitMs = Math.min(asked, UNBAN_TOTAL_WAIT_BUDGET_MS - waited);
+      if (asked > UNBAN_TOTAL_WAIT_BUDGET_MS - waited) {
+        return { unbanFailed: true, banState: 'unknown', retryAt: Date.now() + asked, detail: detail + '; retry delay exceeds immediate budget; recovery required' };
+      }
+      const waitMs = asked;
       if (waitMs <= 0) break; // budget spent
       waited += waitMs;
       await sleep(waitMs);
@@ -214,19 +245,34 @@ export class DiscordApi {
 
     // Every attempt reported failure. Confirm the ban is really still there before saying so.
     const stillBanned = await this.isMemberBanned(guildId, userId);
-    if (stillBanned === false) {
+    const banState = this.banStateFromRecheck(stillBanned);
+    if (banState === 'lifted') {
       return {
         unbanFailed: false,
+        banState,
         detail: `${detail}, but the ban is gone on re-check, so the softban completed`
       };
     }
     return {
       unbanFailed: true,
+      banState,
       detail: `${detail} (ban re-check: ${
-        stillBanned === true ? 'member is still banned' : 'inconclusive, assuming still banned'
+        banState === 'still_banned' ? 'member is still banned' : 'inconclusive, assuming still banned'
       })`
     };
   }
+}
+
+/** Whether the softban's ban is known to be gone, known to remain, or unverifiable. */
+export type SoftbanBanState = 'lifted' | 'still_banned' | 'unknown';
+
+export interface SoftbanUnbanOutcome {
+  /** True when the member should be assumed still banned, including the unknown case. */
+  unbanFailed: boolean;
+  banState: SoftbanBanState;
+  /** Log ready description of every attempt and the re-check. */
+  detail: string;
+  retryAt?: number;
 }
 
 /**

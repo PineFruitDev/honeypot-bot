@@ -1,13 +1,23 @@
 import {
+  ApplicationIntegrationType,
   ChannelType,
+  InteractionContextType,
   MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
   type Guild,
+  type PermissionsString,
   type TextChannel
 } from 'discord.js';
 import { Command, type CommandHelpInfo } from '../core/Command.js';
+import {
+  LOG_CHANNEL_PERMISSIONS,
+  auditSetup,
+  escalationWarning,
+  missingChannelPermissions,
+  roleHierarchyIssue
+} from '../services/BotPermissions.js';
 import {
   DEFAULT_HONEYPOT_ACTION,
   GuildConfigStore,
@@ -28,10 +38,25 @@ import { actionLabel, statsEmbed } from '../config/honeypotText.js';
 export class HoneypotCommand extends Command {
   public readonly guildOnly = true;
 
+  /**
+   * Re-checked against the interaction on every run.
+   *
+   * `setDefaultMemberPermissions` below is only the default Discord presents, and a server
+   * admin can override it for a role or a channel. This command creates channels and
+   * removes members, so the authorization it was registered with gets verified rather
+   * than assumed.
+   */
+  public readonly userPermissions: PermissionsString[] = ['Administrator'];
+
   public readonly data = new SlashCommandBuilder()
     .setName('honeypot')
     .setDescription('Set up and manage the honeypot trap channel.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    // Everything this command does is server state, so it is registered for server
+    // installs in server contexts only. A user install would put it in DMs, where there
+    // is no guild to configure and no permission model to check it against.
+    .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
     .addSubcommand(sub =>
       sub
         .setName('setup')
@@ -165,12 +190,17 @@ export class HoneypotCommand extends Command {
       ? actionOption
       : DEFAULT_HONEYPOT_ACTION;
 
-    const missing = EnforcementService.missingPermissionsFor(guild, action);
-    if (missing.length) {
+    const existingChannel = interaction.options.getChannel('channel') as TextChannel | null;
+
+    // Everything that would stop the trap working, checked before anything is created, and
+    // reported together. A guild-level check alone passes on a channel whose overwrites
+    // take the same permission straight back off the bot.
+    const gaps = auditSetup({ guild, action, channel: existingChannel });
+    if (gaps.length) {
       await interaction.editReply(
-        `I can't apply a **${actionLabel(action)}** without the **${missing.join(
-          '**, **'
-        )}** permission. Grant it and run this again.`
+        [`I can't arm a **${actionLabel(action)}** trap yet:`, ...gaps.map(gap => `- ${gap}`)].join(
+          '\n'
+        )
       );
       return;
     }
@@ -183,7 +213,20 @@ export class HoneypotCommand extends Command {
       return;
     }
 
-    const existingChannel = interaction.options.getChannel('channel') as TextChannel | null;
+    // The role can pre-date this setup and have been moved above the bot since, in which
+    // case the Hide Channel button would fail for every member who pressed it.
+    const hideRoleIssue = roleHierarchyIssue(guild, hideRole);
+    if (hideRoleIssue) {
+      await interaction.editReply(
+        `I can't hand out the hide role, so the **Hide Channel** button would not work. ${hideRoleIssue}`
+      );
+      return;
+    }
+
+    // Not a blocker: a timeout or quarantine trap works fine without Ban Members, it just
+    // cannot escalate. Said once, at setup, rather than left to a report nobody expects.
+    const escalation = escalationWarning(guild, action);
+    const note = escalation ? `\n\n${escalation}` : '';
 
     if (existingChannel) {
       const refusal = await this.refuseUnsafeConversion(guild, existingChannel);
@@ -195,7 +238,7 @@ export class HoneypotCommand extends Command {
       const result = await HoneypotService.convertExisting(guild, hideRole, existingChannel, action);
       await interaction.editReply(
         result.ok
-          ? `Converted <#${existingChannel.id}> into the honeypot. Anyone who posts there gets a **${actionLabel(action)}**.`
+          ? `Converted <#${existingChannel.id}> into the honeypot. Anyone who posts there gets a **${actionLabel(action)}**.${note}`
           : result.reason
       );
       return;
@@ -205,7 +248,7 @@ export class HoneypotCommand extends Command {
     const result = await HoneypotService.deployNew(guild, hideRole, name, action);
     await interaction.editReply(
       result.ok
-        ? `Honeypot armed in <#${result.channel.id}>. Anyone who posts there gets a **${actionLabel(action)}**.\n\nSet a log channel with \`/honeypot config log-channel:#your-channel\` so you see who it catches.`
+        ? `Honeypot armed in <#${result.channel.id}>. Anyone who posts there gets a **${actionLabel(action)}**.\n\nSet a log channel with \`/honeypot config log-channel:#your-channel\` so you see who it catches.${note}`
         : result.reason
     );
   }
@@ -232,8 +275,7 @@ export class HoneypotCommand extends Command {
         return `<#${channel.id}> has recent messages from real people, so it's still in use. Trapping it would remove the next person who posts. Pick an empty channel, or let me create one.`;
       }
     } catch {
-      // Cannot read the history: fall through and allow it. The admin explicitly named
-      // this channel, and refusing on a permissions hiccup would be more confusing.
+      return 'I could not verify that this channel is unused. Check Read Message History, or let me create a new channel.';
     }
     return null;
   }
@@ -263,6 +305,8 @@ export class HoneypotCommand extends Command {
       }
       await store.patchGuild(guild.id, { action: actionOption });
       changes.push(`Action is now **${actionLabel(actionOption)}**.`);
+      const escalation = escalationWarning(guild, actionOption);
+      if (escalation) changes.push(escalation);
     }
 
     const logChannel = interaction.options.getChannel('log-channel') as TextChannel | null;
@@ -270,6 +314,17 @@ export class HoneypotCommand extends Command {
       if (logChannel.id === current.channelId) {
         await interaction.editReply(
           'The log channel cannot be the trap itself. Reports name the offender, and the trap is public.'
+        );
+        return;
+      }
+      // Refused now rather than discovered later: a log channel the bot cannot post an
+      // embed in means every action report silently goes nowhere.
+      const missingThere = missingChannelPermissions(guild, logChannel, LOG_CHANNEL_PERMISSIONS);
+      if (missingThere.length) {
+        await interaction.editReply(
+          `I need the **${missingThere.join('**, **')}** permission in <#${
+            logChannel.id
+          }> to post action reports there. Grant it on that channel and run this again.`
         );
         return;
       }

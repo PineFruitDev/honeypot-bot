@@ -32,8 +32,7 @@ export class HoneypotService {
    * on a busy server. One role costs one overwrite no matter how many people use it.
    */
   public static async ensureHideRole(guild: Guild): Promise<Role | null> {
-    const existing = guild.roles.cache.find(role => role.name === HIDE_ROLE_NAME);
-    if (existing) return existing;
+    // Role names are not ownership: never hand out an unrelated role with this name.
 
     try {
       return await guild.roles.create({
@@ -90,6 +89,7 @@ export class HoneypotService {
     }
 
     const messageId = await this.postSticky(channel, 0);
+    if (!messageId) return { ok: false, reason: 'I could not post the trap warning, so the trap was not armed. Check Send Messages and Embed Links.' };
     await GuildConfigStore.getInstance()?.setTrap(guild.id, {
       channelId: channel.id,
       hideRoleId: hideRole.id,
@@ -133,6 +133,7 @@ export class HoneypotService {
     }
 
     const messageId = await this.postSticky(channel, 0);
+    if (!messageId) return { ok: false, reason: 'I could not post the trap warning, so the trap was not armed. Check Send Messages and Embed Links.' };
     await GuildConfigStore.getInstance()?.setTrap(guild.id, {
       channelId: channel.id,
       hideRoleId: hideRole.id,
@@ -151,7 +152,7 @@ export class HoneypotService {
    * trapping either would remove people for doing exactly what the server asked them to do.
    */
   public static isProtectedChannel(guild: Guild, channelId: string): boolean {
-    return channelId === guild.systemChannelId || channelId === guild.rulesChannelId;
+    return channelId === guild.systemChannelId || channelId === guild.rulesChannelId || channelId === guild.safetyAlertsChannelId;
   }
 
   /** Post the trap message and return its ID. */
@@ -187,7 +188,8 @@ export class HoneypotService {
 
     const previousId = config.messageId;
     const newId = await this.postSticky(channel, store.getCatchTotal(guild.id));
-    if (newId) await store.setStickyMessage(guild.id, newId);
+    if (!newId) return; // Keep the previous warning and binding when replacement fails.
+    await store.setStickyMessage(guild.id, newId);
 
     if (previousId) {
       try {
