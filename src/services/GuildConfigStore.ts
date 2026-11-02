@@ -195,6 +195,16 @@ export class GuildConfigStore {
 
   public async drain(): Promise<void> { await this.writeChain; }
 
+  /**
+   * Wait for every queued write to land.
+   *
+   * Called on shutdown. Writes are chained rather than immediate, so without this a catch
+   * recorded in the last moments before a restart can be lost even though it succeeded.
+   */
+  public async flush(): Promise<void> {
+    await this.writeChain;
+  }
+
   public getGuild(guildId: string): GuildConfig | undefined {
     return structuredClone(this.data.guilds[guildId]);
   }
