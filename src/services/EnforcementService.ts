@@ -95,7 +95,7 @@ export class EnforcementService {
 
     // A throwaway account that trips the trap is escalated to a real ban regardless of the
     // configured action. Spam rings cycle fresh accounts, and a kick just invites the next one.
-    const escalated = isNewAccount(user.id, Date.now());
+    const escalated = source === 'message' && isNewAccount(user.id, Date.now());
     const requested = opts.requestedAction ?? config.action ?? DEFAULT_HONEYPOT_ACTION;
     const action: HoneypotAction = escalated ? 'ban' : requested;
 
@@ -111,43 +111,43 @@ export class EnforcementService {
     const blockedReason = actionBlockedReason(guild, action, member);
     if (blockedReason) { result = 'missing_perms'; finalAction = 'none'; }
     if (!blockedReason) {
-    try {
-      switch (action) {
-        case 'ban':
-          result = await DiscordApi.banMember(guild.id, user.id, reason, PURGE_SECONDS);
-          break;
+      try {
+        switch (action) {
+          case 'ban':
+            result = await DiscordApi.banMember(guild.id, user.id, reason, PURGE_SECONDS);
+            break;
 
-        case 'kick': {
-          // A kick is carried out as a softban: ban with a 7 day purge, then unban. The net
-          // effect is a kick, but it also wipes the spam from every channel in one call,
-          // which a plain kick cannot do. If the ban fails there is nothing to undo.
-          //
-          // The intent is journalled to disk *before* the ban, because the gap between the
-          // two halves is the one place a crash leaves a real person banned when a kick was
-          // intended. Whatever is still in the journal at startup is an unban the previous
-          // process owed somebody, and recoverPendingSoftbans pays it.
-          const outcome = await this.runSoftban({ guild, user, reason, log });
-          result = outcome.result;
-          unbanFailed = outcome.unbanFailed;
-          banState = outcome.banState;
-          break;
+          case 'kick': {
+            // A kick is carried out as a softban: ban with a 7 day purge, then unban. The net
+            // effect is a kick, but it also wipes the spam from every channel in one call,
+            // which a plain kick cannot do. If the ban fails there is nothing to undo.
+            //
+            // The intent is journalled to disk *before* the ban, because the gap between the
+            // two halves is the one place a crash leaves a real person banned when a kick was
+            // intended. Whatever is still in the journal at startup is an unban the previous
+            // process owed somebody, and recoverPendingSoftbans pays it.
+            const outcome = await this.runSoftban({ guild, user, reason, log });
+            result = outcome.result;
+            unbanFailed = outcome.unbanFailed;
+            banState = outcome.banState;
+            break;
+          }
+
+          case 'timeout':
+            result = await this.timeoutMember(member, reason);
+            break;
+
+          case 'quarantine': {
+            const quarantined = await this.quarantineMember(guild, member, reason);
+            result = quarantined;
+            if (quarantined !== 'success') finalAction = 'none';
+            break;
+          }
         }
-
-        case 'timeout':
-          result = await this.timeoutMember(member, reason);
-          break;
-
-        case 'quarantine': {
-          const quarantined = await this.quarantineMember(guild, member, reason);
-          result = quarantined;
-          if (quarantined !== 'success') finalAction = 'none';
-          break;
-        }
+      } catch (error) {
+        log.error('handleCatch - Action threw', error, { action });
+        result = 'error';
       }
-    } catch (error) {
-      log.error('handleCatch - Action threw', error, { action });
-      result = 'error';
-    }
 
     }
 
@@ -161,14 +161,15 @@ export class EnforcementService {
       );
     }
 
-    const total = await store.recordCatch(guild.id, {
+    let total = store.getCatchTotal(guild.id);
+    try { total = await store.recordCatch(guild.id, {
       userId: user.id,
       userTag: user.tag,
       action: finalAction,
       escalated,
       source,
       caughtAt: new Date().toISOString()
-    });
+    }); } catch (error) { log.error('handleCatch - Action completed but catch history could not be saved', error); }
     log.info('handleCatch - Caught and acted on a member', {
       action: finalAction,
       result,
@@ -213,33 +214,44 @@ export class EnforcementService {
   }): Promise<{ result: ActionResult; unbanFailed: boolean; banState?: SoftbanBanState }> {
     const { guild, user, reason, log } = opts;
     const journal = PendingActionStore.getInstance();
+    if (!journal || journal.degraded) {
+      log.error('runSoftban - Refusing a softban without a healthy recovery journal');
+      return { result: 'error', unbanFailed: false };
+    }
+    if (journal.listForGuild(guild.id).some(record => record.userId === user.id)) {
+      log.warn('runSoftban - An earlier softban still needs recovery');
+      return { result: 'error', unbanFailed: true, banState: 'unknown' };
+    }
+    if (await DiscordApi.isMemberBanned(guild.id, user.id) !== false) {
+      log.warn('runSoftban - Cannot prove this member is currently unbanned; refusing to replace a possible staff ban');
+      return { result: 'error', unbanFailed: false };
+    }
     const entry = await journal?.open({
       guildId: guild.id,
       userId: user.id,
       userTag: user.tag
     });
 
-    if (journal && !entry?.persisted) {
-      // The journal is the only thing that makes this action recoverable. Without it a
-      // crash mid-softban is unrecoverable and silent, so say so rather than hiding it.
-      log.error(
-        'runSoftban - Proceeding with a softban that could not be journalled, a crash before the unban would not be recoverable',
-        undefined,
-        { action: 'kick' }
-      );
+    if (!entry?.persisted) {
+      log.error('runSoftban - Refusing a softban whose recovery intent could not be saved');
+      return { result: 'error', unbanFailed: false };
     }
 
     const result = await DiscordApi.banMember(
       guild.id,
       user.id,
-      `${reason} [softban: kick and purge]`,
+      `[honeypot:${entry.id}] ${reason} [softban: kick and purge]`,
       PURGE_SECONDS
     );
 
     if (result !== 'success') {
-      // No ban means nothing to undo, so the record is not owed to anyone.
-      if (entry) await journal?.resolve(entry.id);
-      return { result, unbanFailed: false };
+      if (result === 'missing_perms') {
+        await journal.resolve(entry.id);
+        return { result, unbanFailed: false };
+      }
+      // Transport errors can happen after Discord accepted the ban. Retain the intent.
+      await journal.setPhase(entry.id, 'unresolved', 'Ban request outcome is uncertain');
+      return { result, unbanFailed: true, banState: 'unknown' };
     }
 
     if (entry) await journal?.setPhase(entry.id, 'unban_pending');
@@ -250,7 +262,7 @@ export class EnforcementService {
       return { result, unbanFailed: false, banState: unban.banState };
     }
 
-    if (entry) await journal?.setPhase(entry.id, 'unresolved', unban.detail);
+    if (entry) await journal?.setPhase(entry.id, 'unresolved', unban.detail, unban.retryAt);
     log.error(
       'runSoftban - Softban unban FAILED, the member may still be banned though the configured action was kick',
       undefined,
@@ -267,7 +279,7 @@ export class EnforcementService {
    */
   public static async recoverPendingSoftbans(guild: Guild): Promise<void> {
     const journal = PendingActionStore.getInstance();
-    if (!journal) return;
+    if (!journal || journal.degraded) return;
 
     const pending = journal.listForGuild(guild.id);
     if (!pending.length) return;
@@ -278,6 +290,7 @@ export class EnforcementService {
     });
 
     for (const record of pending) {
+      if (record.retryAt && record.retryAt > Date.now()) continue;
       const recordLog = log.child({ correlationId: record.id, userId: record.userId });
 
       // A record that has used its budget is left exactly as it is. Retrying a ban lookup
@@ -313,6 +326,13 @@ export class EnforcementService {
           continue;
         }
 
+        const reason = await DiscordApi.banReason(guild.id, record.userId);
+        if (!reason?.startsWith(`[honeypot:${record.id}] `)) {
+          await journal.noteRecoveryAttempt(record.id, 'Current ban cannot be attributed to this softban; staff review required');
+          await this.alertPendingSoftban(guild, record.userTag, record.userId, 'unknown');
+          continue;
+        }
+
         const unban = await DiscordApi.softbanUnban(guild.id, record.userId);
         if (!unban.unbanFailed) {
           await journal.resolve(record.id);
@@ -324,7 +344,7 @@ export class EnforcementService {
           continue;
         }
 
-        await journal.setPhase(record.id, 'unresolved', unban.detail);
+        await journal.setPhase(record.id, 'unresolved', unban.detail, unban.retryAt);
         await journal.noteRecoveryAttempt(record.id, unban.detail);
         recordLog.error('recoverPendingSoftbans - Could not lift a leftover ban', undefined, {
           banState: unban.banState,
@@ -436,7 +456,15 @@ export class EnforcementService {
     if (hierarchy) return 'missing_perms';
 
     try {
-      await member.roles.add(role, reason);
+      const updated = await member.roles.add(role, reason);
+      const channels = [...guild.channels.cache.values()];
+      if (!channels.length || channels.some(channel => {
+        const effective = channel.permissionsFor(updated);
+        return !effective || effective.has(PermissionFlagsBits.ViewChannel);
+      })) {
+        this.logger.error('quarantineMember - Role applied but some channels remain accessible; staff action required');
+        return 'error';
+      }
       return 'success';
     } catch (error: any) {
       this.logger.error(`quarantineMember - Failed for ${member.id}:`, error);
@@ -449,14 +477,14 @@ export class EnforcementService {
     const known = store?.getGuild(guild.id)?.quarantineRoleId;
     if (known) {
       const cached = guild.roles.cache.get(known);
-      if (cached) return cached;
+      if (cached) {
+        if (cached.permissions.bitfield !== 0n || cached.managed) return null;
+        await this.lockChannelsForRole(guild, cached);
+        return cached;
+      }
     }
 
-    const existing = guild.roles.cache.find(role => role.name === QUARANTINE_ROLE_NAME);
-    if (existing) {
-      await store?.patchGuild(guild.id, { quarantineRoleId: existing.id });
-      return existing;
-    }
+    // A matching role name is not proof that this bot owns that role.
 
     try {
       const role = await guild.roles.create({

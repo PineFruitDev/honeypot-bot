@@ -42,6 +42,7 @@ export interface PendingAction {
   recoveryAttempts: number;
   /** Last failure description, already redacted by the caller. */
   detail?: string;
+  retryAt?: number;
 }
 
 interface JournalShape {
@@ -79,7 +80,8 @@ function parseRecord(value: unknown): PendingAction | null {
       typeof record.recoveryAttempts === 'number' && record.recoveryAttempts >= 0
         ? record.recoveryAttempts
         : 0,
-    detail: typeof record.detail === 'string' ? record.detail : undefined
+    detail: typeof record.detail === 'string' ? record.detail : undefined,
+    retryAt: typeof record.retryAt === 'number' && Number.isFinite(record.retryAt) ? record.retryAt : undefined
   };
 }
 
@@ -128,13 +130,15 @@ export class PendingActionStore {
 
     try {
       const parsed = JSON.parse(raw) as Partial<JournalShape>;
-      const entries = Array.isArray(parsed?.pending) ? parsed.pending : [];
+      if (parsed?.version !== 1 || !Array.isArray(parsed.pending)) throw new Error('Invalid journal schema');
+      const entries = parsed.pending;
       let skipped = 0;
       for (const entry of entries) {
         const record = parseRecord(entry);
-        if (record) this.records.set(record.id, record);
+        if (record && !this.records.has(record.id)) this.records.set(record.id, record);
         else skipped++;
       }
+      if (skipped) this.loadFailed = true;
       this.logger.info('load - Pending action journal loaded', {
         pending: this.records.size,
         skipped
@@ -147,7 +151,7 @@ export class PendingActionStore {
         action: 'journal_load'
       });
       await fs
-        .rename(this.filePath, `${this.filePath}.corrupt`)
+        .copyFile(this.filePath, `${this.filePath}.corrupt`)
         .catch(renameError =>
           this.logger.error('load - Could not set the corrupt journal aside', renameError)
         );
@@ -166,22 +170,31 @@ export class PendingActionStore {
    * (which, for a softban, is the whole point) can await it. Failures reject so the caller
    * can decide, rather than disappearing into the log.
    */
-  private persist(): Promise<void> {
-    const next = this.writeChain.then(async () => {
-      const payload: JournalShape = {
-        version: 1,
-        pending: [...this.records.values()]
-      };
-      const tempPath = `${this.filePath}.${process.pid}.tmp`;
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), 'utf-8');
+  private async persist(): Promise<void> {
+    if (this.loadFailed) throw new Error('Journal requires operator repair before writes');
+    const tempPath = `${this.filePath}.${process.pid}.tmp`;
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    try {
+      const handle = await fs.open(tempPath, 'w', 0o600);
+      try {
+        await handle.writeFile(JSON.stringify({ version: 1, pending: [...this.records.values()] }, null, 2));
+        await handle.sync();
+      } finally { await handle.close(); }
       await fs.rename(tempPath, this.filePath);
-    });
+    } finally { await fs.rm(tempPath, { force: true }); }
+  }
 
-    // Keep the chain alive even when this write failed, so one bad write does not wedge
-    // every later one.
-    this.writeChain = next.catch(() => {});
-    return next;
+  private mutate<T>(operation: () => T): Promise<T> {
+    const result = this.writeChain.then(async () => {
+      const previous = structuredClone(this.records);
+      try {
+        const value = operation();
+        await this.persist();
+        return value;
+      } catch (error) { this.records = previous; throw error; }
+    });
+    this.writeChain = result.then(() => {}, () => {});
+    return result;
   }
 
   /**
@@ -207,10 +220,8 @@ export class PendingActionStore {
       updatedAt: now,
       recoveryAttempts: 0
     };
-    this.records.set(record.id, record);
-
     try {
-      await this.persist();
+      await this.mutate(() => this.records.set(record.id, record));
       return { id: record.id, persisted: true };
     } catch (error) {
       this.logger.error('open - Could not journal a softban before acting', error, {
@@ -221,46 +232,34 @@ export class PendingActionStore {
     }
   }
 
-  public async setPhase(id: string, phase: PendingPhase, detail?: string): Promise<void> {
-    const record = this.records.get(id);
-    if (!record) return;
-    record.phase = phase;
-    record.updatedAt = new Date().toISOString();
-    if (detail !== undefined) record.detail = detail.slice(0, 500);
-    await this.persist().catch(error =>
-      this.logger.error('setPhase - Could not journal a phase change', error, {
-        guildId: record.guildId,
-        action: 'softban_phase'
-      })
-    );
+  public async setPhase(id: string, phase: PendingPhase, detail?: string, retryAt?: number): Promise<void> {
+    await this.mutate(() => {
+      const record = this.records.get(id);
+      if (!record) return;
+      record.phase = phase;
+      record.updatedAt = new Date().toISOString();
+      if (detail !== undefined) record.detail = detail.slice(0, 500);
+      if (retryAt !== undefined) record.retryAt = retryAt;
+    }).catch(error => this.logger.error('setPhase - Could not journal phase change', error));
   }
 
   public async noteRecoveryAttempt(id: string, detail?: string): Promise<void> {
-    const record = this.records.get(id);
-    if (!record) return;
-    record.recoveryAttempts += 1;
-    record.updatedAt = new Date().toISOString();
-    if (detail !== undefined) record.detail = detail.slice(0, 500);
-    await this.persist().catch(error =>
-      this.logger.error('noteRecoveryAttempt - Could not journal a recovery attempt', error, {
-        guildId: record.guildId,
-        action: 'softban_recovery'
-      })
-    );
+    await this.mutate(() => {
+      const record = this.records.get(id);
+      if (!record) return;
+      record.recoveryAttempts += 1;
+      record.updatedAt = new Date().toISOString();
+      if (detail !== undefined) record.detail = detail.slice(0, 500);
+    }).catch(error => this.logger.error('noteRecoveryAttempt - Could not journal recovery attempt', error));
   }
 
-  /** The action finished as intended: the member is not banned. Forget it. */
   public async resolve(id: string): Promise<void> {
-    if (!this.records.delete(id)) return;
-    await this.persist().catch(error =>
-      this.logger.error('resolve - Could not journal a resolution', error, {
-        action: 'softban_resolve'
-      })
-    );
+    await this.mutate(() => this.records.delete(id))
+      .catch(error => this.logger.error('resolve - Could not journal resolution', error));
   }
 
   public list(): PendingAction[] {
-    return [...this.records.values()];
+    return structuredClone([...this.records.values()]);
   }
 
   public listForGuild(guildId: string): PendingAction[] {

@@ -275,8 +275,7 @@ export class HoneypotCommand extends Command {
         return `<#${channel.id}> has recent messages from real people, so it's still in use. Trapping it would remove the next person who posts. Pick an empty channel, or let me create one.`;
       }
     } catch {
-      // Cannot read the history: fall through and allow it. The admin explicitly named
-      // this channel, and refusing on a permissions hiccup would be more confusing.
+      return 'I could not verify that this channel is unused. Check Read Message History, or let me create a new channel.';
     }
     return null;
   }

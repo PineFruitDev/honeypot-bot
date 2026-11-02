@@ -32,6 +32,7 @@ const realToken = process.env.DISCORD_TOKEN;
 
 beforeEach(() => {
   delete process.env.DISCORD_TOKEN;
+  process.env.LOG_FORMAT = 'json';
 });
 
 afterEach(() => {
@@ -56,14 +57,14 @@ test('a token-shaped string is redacted wherever it appears', () => {
   const out = redactSecrets(`login failed for ${TOKEN_SHAPED} at the gateway`);
 
   assert.ok(!out.includes(TOKEN_SHAPED), 'the token must not survive');
-  assert.match(out, /\[redacted-token\]/);
+  assert.match(out, /\[redacted\]/);
 });
 
 test('an Authorization value is redacted even when the token is an odd shape', () => {
   const out = redactSecrets('headers: { authorization: Bot abc.def }');
 
   assert.ok(!out.includes('abc.def'));
-  assert.match(out, /authorization=\[redacted\]/i);
+  assert.match(out, /authorization[:=]\s*\[redacted\]/i);
 });
 
 test('an env-style assignment of any secret-ish name is redacted', () => {
@@ -81,7 +82,7 @@ test('the live token is redacted by exact match even if its shape is unusual', (
   const out = redactSecrets('login with not-token-shaped-at-all failed');
 
   assert.ok(!out.includes('not-token-shaped-at-all'));
-  assert.match(out, /\[redacted-token\]/);
+  assert.match(out, /\[redacted\]/);
 });
 
 test('an error is reduced to allowlisted fields, dropping the request that carried a token', () => {
@@ -162,8 +163,9 @@ test('a log line carries its correlation, guild and action fields', async () => 
     logger.error('handleCatch - Action FAILED', undefined, { action: 'kick', result: 'error' });
   });
 
-  assert.match(output, /\[Test\] handleCatch - Action FAILED/);
-  const fields = JSON.parse(output.slice(output.indexOf('{')));
+  assert.ok(output.includes('handleCatch - Action FAILED'));
+  const entry = JSON.parse(output);
+  const fields = { ...entry, ...Object.assign({}, ...(entry.details ?? []).map(value => JSON.parse(value))) };
   assert.equal(fields.correlationId, 'abc1234567');
   assert.equal(fields.guildId, '111111111111111111');
   assert.equal(fields.action, 'kick');
@@ -181,7 +183,8 @@ test('an error passed as the second argument is folded into the error field, not
   });
 
   assert.ok(!output.includes(TOKEN_SHAPED));
-  const fields = JSON.parse(output.slice(output.indexOf('{')));
+  const entry = JSON.parse(output);
+  const fields = { ...entry, ...Object.assign({}, ...(entry.details ?? []).map(value => JSON.parse(value))) };
   assert.equal(fields.error.message, 'boom');
   assert.equal(fields.error.options, undefined);
 });
@@ -197,7 +200,7 @@ test('structured fields are swept for secrets too', () => {
   const printed = formatFields({ guildId: '1', detail: `used ${TOKEN_SHAPED} to authenticate` });
 
   assert.ok(!printed.includes(TOKEN_SHAPED));
-  assert.match(printed, /\[redacted-token\]/);
+  assert.match(printed, /\[redacted\]/);
 });
 
 test('field serialization never throws on a circular object', () => {

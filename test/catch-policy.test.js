@@ -16,6 +16,7 @@ import path from 'node:path';
 
 import { ChannelType, Collection, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { EnforcementService } from '../dist/services/EnforcementService.js';
+import { PendingActionStore } from '../dist/services/PendingActionStore.js';
 import { GuildConfigStore } from '../dist/services/GuildConfigStore.js';
 
 const GUILD = '111111111111111111';
@@ -104,7 +105,7 @@ function createGuild({ memberToFetch = null, channels = [] } = {}) {
 function stubFetch() {
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ method: (init.method ?? 'GET').toUpperCase(), url: String(url), body: init.body });
-    return new Response(null, { status: 204 });
+    return new Response(null, { status: (init.method ?? 'GET') === 'GET' ? 404 : 204 });
   };
 }
 
@@ -131,12 +132,15 @@ beforeEach(async () => {
   dms = [];
   memberFetches = [];
   reports = [];
+  PendingActionStore.instance = null;
+  await PendingActionStore.init(dataDir);
   process.env.DISCORD_TOKEN = 'test-token';
   stubFetch();
 });
 
 afterEach(async () => {
   globalThis.fetch = realFetch;
+  PendingActionStore.instance = null;
   GuildConfigStore.instance = null;
   await fs.rm(dataDir, { recursive: true, force: true });
 });
@@ -434,4 +438,13 @@ test('a closed DM never stops the action or the record', async () => {
   assert.equal(outcome.result, 'success');
   assert.equal(outcome.action, 'ban');
   assert.equal(store.getCatchTotal(GUILD), 1);
+});
+
+test('a young account pressing a decoy is softbanned without permanent escalation', async () => {
+  await freshStore({ action: 'ban' });
+  const outcome = await EnforcementService.handleCatch({ guild: createGuild(), user: createUser(THROWAWAY), member: createMember(THROWAWAY), trigger: 'pressed a trap button', source: 'button', requestedAction: 'kick' });
+  assert.equal(outcome.action, 'kick');
+  assert.equal(outcome.escalated, false);
+  assert.equal(bans().length, 1);
+  assert.equal(unbans().length, 1);
 });

@@ -93,7 +93,7 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replace: string | ((...m: string
   // `DISCORD_TOKEN=...`, `"secret": "..."`, and anything else named like a credential.
   {
     pattern:
-      /\b([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|apikey|authorization|credential)[A-Za-z0-9_.-]*)(["']?\s*[:=]\s*)(["']?)([^\s"',;}]+)\3/gi,
+      /\b([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|apikey|authorization|credential)[A-Za-z0-9_.-]*)(["']?\s*[:=]\s*)(["']?)(?:(?:Bot|Bearer)\s+)?([^\s"',;}]+)\3/gi,
     replace: (_m, key, separator, quote) => `${key}${separator}${quote}${REDACTED}${quote}`
   }
 ];
@@ -132,7 +132,9 @@ export function redact(input: string, env: NodeJS.ProcessEnv = process.env): str
  */
 export function describeContent(value: unknown): string {
   if (value === null || value === undefined) return '<none>';
-  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? '<none>';
+  let text: string;
+  try { text = typeof value === 'string' ? value : JSON.stringify(value) ?? '<none>'; }
+  catch { return '<redacted object>'; }
   if (text.length === 0) return '<empty>';
 
   const hash = createHash('sha256').update(HASH_SALT).update(text).digest('hex').slice(0, 10);
@@ -257,7 +259,7 @@ function safeUrl(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value) return undefined;
   try {
     const url = new URL(value);
-    return `${url.origin}${url.pathname}`;
+    return clean(`${url.origin}${url.pathname}`);
   } catch {
     return clean(value.split('?')[0]);
   }

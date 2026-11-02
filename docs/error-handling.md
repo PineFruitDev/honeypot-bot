@@ -14,10 +14,9 @@ Every loop that walks guilds, and every event handler, is a boundary.
   revoked Manage Roles, deleted the trap channel or is rate limited is logged and counted,
   and the loop continues. It returns `{ total, failed }` rather than throwing.
 - `Bot.recoverPendingActions` does the same per guild for leftover softbans.
-- The `ClientReady` handler in `src/index.ts` guards reconciliation, recovery and command
-  registration separately. That handler is detached from `main`, so an unguarded throw
+- The `ClientReady` handler in `src/index.ts` guards reconciliation and recovery separately; command registration is an explicit CLI step. That handler is detached from `main`, so an unguarded throw
   inside it would surface as an unhandled rejection; and a failure in one step must not
-  cost the steps after it. A trap that cannot be reconciled still gets its commands.
+  cost the steps after it. Incoming work waits until startup reconciliation and recovery finish.
 - `Bot.routeInteraction` wraps the whole interaction path, so a handler that throws cannot
   escape into the event emitter.
 - `unhandledRejection` is logged and the process keeps running. `uncaughtException` exits,
@@ -32,7 +31,7 @@ posted openly is a hint about how the trap is configured.
   log line, so staff can find the failure from what the user quotes.
 - A press on a trap that has since been removed is answered rather than left to time out.
 - Role-changing interactions defer before any REST work. Adding a role is a round trip,
-  and Discord expires an unacknowledged interaction after three seconds.
+  and Discord expires an unacknowledged interaction after three seconds. Admission limits may reject work without sending a response during a flood.
 
 ## 3. A half finished action is on disk before it is half finished
 
@@ -50,7 +49,8 @@ At startup, `EnforcementService.recoverPendingSoftbans` runs per guild:
 | Ban state on re-check | What happens |
 | --- | --- |
 | Not banned | The record is resolved. Nothing was owed, including when the crash happened before the ban landed. |
-| Banned | The unban is retried. On success staff are told it was repaired; on failure the record stays and staff are alerted. |
+| Banned with this journal entry’s reason marker | The unban is retried. On success staff are told it was repaired; on failure the record stays and staff are alerted. |
+| Banned with an unrelated or missing reason | No unban is attempted; staff must review ownership. |
 | Unreadable | The record stays, the attempt is counted, and staff are told the state could **not** be verified. |
 
 Automatic retries stop after `MAX_RECOVERY_ATTEMPTS` boots, and the alerts stop with them,
@@ -66,7 +66,7 @@ and the offender DM. A report that states a guess as a fact stops being believed
 `Logger` is the only way anything reaches the console.
 
 - Errors are never logged whole. `serializeError` keeps an allowlist (`name`, `message`,
-  `code`, `status`, `method`, `url`, `syscall`, `errno`, a trimmed stack, one level of
+  `code`, `status`, `method`, `url`, `syscall`, `errno`, a trimmed stack, bounded nested
   `cause`) and drops everything else, which is where credentials live: `fetch` and
   discord.js errors can carry the request that produced them, Authorization header
   included.
@@ -92,6 +92,14 @@ sends SIGTERM then SIGINT, or a stuck REST call, cannot block a restart.
   not chosen yet.
 - Alerting is in-Discord only, to the configured log channel. There is no out-of-band
   alert, so a guild with no log channel configured gets console logs alone.
-- `GuildConfigStore` write failures are logged but not surfaced to the operator beyond the
-  log, and its writes are not yet crash atomic.
+- Guild writes are atomic and failures reject. Moderation already completed is still reported if the subsequent history write fails.
 - No alerting on sustained rate limiting.
+
+Softbans are refused when the journal is missing, degraded, or cannot persist the intent.
+An uncertain ban response retains the journal entry. A pre-existing ban is never knowingly
+replaced by a softban, and startup recovery requires the exact journal marker in the current
+ban reason before unbanning. Older records without a matching marker require staff review.
+Long server retry deadlines are persisted and honored across restarts. Recovery runs at
+startup, not on a background timer; unresolved records also need operator attention.
+A corrupt journal remains in place and is copied to a sidecar for diagnosis, so rebooting
+does not silently reset the failure. Repair it while the bot is stopped.

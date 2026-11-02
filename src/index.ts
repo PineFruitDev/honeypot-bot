@@ -33,10 +33,8 @@ async function main() {
 
     const bot = new Bot(config.discordToken, ALL_COMMANDS);
 
-    // Once online: reconcile each trap against what is actually in the server, pay off any
-    // unban a previous run owed, then make sure Discord is holding the command set this
-    // build ships. Reconciliation runs first because it is local and instant, while
-    // registration is a round trip.
+    // Once online, reconcile traps and recover attributable pending softbans.
+    // Command registration remains an explicit release step.
     //
     // Every step here is independently guarded. This handler runs detached from main, so
     // an unguarded throw inside it becomes an unhandled rejection, and a failure in one
@@ -61,6 +59,7 @@ async function main() {
       } catch (error) {
         logger.error('Pending action recovery failed, continuing to start up', error);
       }
+      bot.markReady();
 
     }
 

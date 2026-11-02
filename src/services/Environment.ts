@@ -361,7 +361,7 @@ export class Environment {
   private static logResolved(config: BotConfig): void {
     this.logger.info(`validate - Environment: ${config.nodeEnv}`);
     this.logger.info(`validate - Discord client ID: ${config.discordClientId}`);
-    this.logger.info('validate - Discord token: present');
+    this.logger.info('validate - Discord credential is configured');
     this.logger.info(`validate - Data directory: ${config.dataDir}`);
     if (process.env.REGISTER_ON_BOOT) this.logger.warn('validate - REGISTER_ON_BOOT is ignored; register commands explicitly with npm run register.');
     this.logger.info(`validate - Developer IDs configured: ${config.developerIds.length}`);

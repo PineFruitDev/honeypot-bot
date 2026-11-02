@@ -1,5 +1,7 @@
 # Honeypot Bot: public multi-guild readiness audit and hosting plan (Codex) (Grok Bot)
 
+This is the historical pre-implementation audit. See [the release checklist](release.md) for the integrated changes, remaining limits, and deployment status.
+
 Audit date: 2026-11-01. Source baseline: `6dd87b058d5c62ff71e43e5e0c747171b0e98f97`.
 
 **Decision: multi-guild foundations exist; broad public rollout should wait for the fixes below.** This is a static, docs-only review, not runtime acceptance or a security certification. No installs, bot execution, credential inspection, external documentation lookup, portal changes or deployment were performed. The initial `gh pr list --state open` returned no open PRs. Provider pricing, account capacity and current Discord platform limits remain unverified under the network restriction. Function names below identify the reviewed code precisely.

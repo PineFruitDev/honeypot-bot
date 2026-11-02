@@ -50,6 +50,9 @@ export class Bot {
   /** Catches in progress, so a shutdown can wait for them instead of abandoning them. */
   private inFlight = new Set<Promise<unknown>>();
   private stopping = false;
+  private acceptingEvents = false;
+
+  public markReady(): void { this.acceptingEvents = true; }
 
   constructor(
     private token: string,
@@ -79,7 +82,7 @@ export class Bot {
    */
   private track<T>(work: Promise<T>): Promise<T> {
     this.inFlight.add(work);
-    void work.finally(() => this.inFlight.delete(work));
+    void work.then(() => this.inFlight.delete(work), () => this.inFlight.delete(work));
     return work;
   }
 
@@ -130,6 +133,10 @@ export class Bot {
 
   private async routeInteraction(interaction: Interaction): Promise<void> {
     try {
+      if (this.stopping || !this.acceptingEvents) {
+        if (interaction.isRepliable()) await this.respondEphemeral(interaction, 'The bot is starting or stopping. Please try again shortly.');
+        return;
+      }
       if (interaction.isButton()) {
         await this.handleButton(interaction);
         return;
@@ -183,6 +190,7 @@ export class Bot {
 
   /** Anyone who posts in the trap channel is caught. */
   private async handleMessage(message: Message): Promise<void> {
+    if (this.stopping || !this.acceptingEvents) return;
     const correlationId = newCorrelationId();
     const log = this.logger.child({ ...messageCorrelation(message), correlationId });
     let release: (() => void) | null = null;
@@ -195,7 +203,10 @@ export class Bot {
       );
 
       if (!verdict.catch) {
-        if (verdict.deleteMessage) await message.delete().catch(() => {});
+        if (verdict.deleteMessage && message.guildId) {
+          release = this.guard.acquire(message.guildId, message.author.id, message.id);
+          if (release) await message.delete().catch(() => {});
+        }
         // Only worth a line for the two that look like a catch and are not, so a staff
         // member asking "why did nothing happen?" finds the answer in the log.
         if (verdict.reason === 'discord-member-notice' || verdict.reason === 'posted-by-a-webhook') {
@@ -218,10 +229,11 @@ export class Bot {
         return;
       }
 
+      if (HoneypotService.isProtectedChannel(guild, message.channelId)) return;
       release = this.guard.acquire(guild.id, message.author.id, message.id);
       if (!release) return;
       const config = GuildConfigStore.getInstance()?.getGuild(guild.id);
-      if (!config || await EnforcementService.isExempt(guild, message.author,
+      if (!config?.messageId || await EnforcementService.isExempt(guild, message.author,
         message.member, config.exemptUserIds, config.exemptRoleIds)) return;
       await message.delete().catch(() => {});
 
@@ -242,7 +254,7 @@ export class Bot {
   private async handleButton(interaction: Interaction): Promise<void> {
     if (!interaction.isButton() || !interaction.guild) return;
     const correlationId = newCorrelationId();
-    const log = this.logger.child({ correlationId, guildId: interaction.guild.id });
+    const log = this.logger.child({ ...interactionCorrelation(interaction), correlationId });
     const store = GuildConfigStore.getInstance();
     const config = store?.getGuild(interaction.guild.id);
 
@@ -281,7 +293,7 @@ export class Bot {
               statsEmbed({
                 total: store.getCatchTotal(guildId),
                 breakdown: store.getActionBreakdown(guildId),
-                recent: store.getRecentCatches(guildId)
+                recent: interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ? store.getRecentCatches(guildId) : []
               })
             ],
             flags: MessageFlags.Ephemeral
@@ -310,7 +322,7 @@ export class Bot {
             trigger: 'pressed a trap button',
             source: 'button',
             // The buttons always kick, whatever the message path is configured to do. The
-            // escalation rule still upgrades a young account to a ban.
+            // button path does not escalate a recoverable misclick to a permanent ban.
             requestedAction: 'kick',
             correlationId
           });
@@ -336,7 +348,10 @@ export class Bot {
     if (!interaction.isButton() || !interaction.guild) return;
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const config = GuildConfigStore.getInstance()?.getGuild(interaction.guild.id);
-    if (!config?.hideRoleId) return;
+    if (!config?.hideRoleId) {
+      await this.respondEphemeral(interaction, 'No hide role is configured. Ask an admin to check Manage Roles and run /honeypot setup again.');
+      return;
+    }
 
     const guild = interaction.guild;
     const role = guild.roles.cache.get(config.hideRoleId);

@@ -42,7 +42,7 @@ export class DiscordApi {
   private static logger = new Logger({ context: 'DiscordApi' });
 
   private static token(): string {
-    const token = process.env.DISCORD_TOKEN;
+    const token = process.env.DISCORD_TOKEN?.trim();
     if (!token) throw new Error('DISCORD_TOKEN is not set');
     return token;
   }
@@ -126,7 +126,7 @@ export class DiscordApi {
       const body = (await res.json()) as { code?: number; message?: string; retry_after?: number };
       if (typeof body?.code === 'number') code = body.code;
       if (typeof body?.message === 'string') message = body.message.slice(0, 200);
-      if (typeof body?.retry_after === 'number') retryAfter = body.retry_after;
+      if (typeof body?.retry_after === 'number' && Number.isFinite(body.retry_after) && body.retry_after > 0) retryAfter = body.retry_after;
     } catch {
       // Empty or non-JSON body. The status alone still beats a bare "error".
     }
@@ -170,6 +170,18 @@ export class DiscordApi {
     } catch {
       return null;
     }
+  }
+
+  /** Ban reason proves recovery belongs to this journal entry, not a later staff ban. */
+  public static async banReason(guildId: string, userId: string): Promise<string | null> {
+    try {
+      const res = await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
+        signal: AbortSignal.timeout(10000), headers: this.authHeaders()
+      });
+      if (!res.ok) return null;
+      const body = await res.json() as { reason?: unknown };
+      return typeof body.reason === 'string' ? body.reason : null;
+    } catch { return null; }
   }
 
   /**
@@ -223,7 +235,7 @@ export class DiscordApi {
       const asked =
         result.retryAfter !== undefined ? Math.ceil(result.retryAfter * 1000) : 250 * attempt;
       if (asked > UNBAN_TOTAL_WAIT_BUDGET_MS - waited) {
-        return { unbanFailed: true, banState: 'unknown', detail: detail + '; retry delay exceeds immediate budget; staff recovery required' };
+        return { unbanFailed: true, banState: 'unknown', retryAt: Date.now() + asked, detail: detail + '; retry delay exceeds immediate budget; recovery required' };
       }
       const waitMs = asked;
       if (waitMs <= 0) break; // budget spent
@@ -260,6 +272,7 @@ export interface SoftbanUnbanOutcome {
   banState: SoftbanBanState;
   /** Log ready description of every attempt and the re-check. */
   detail: string;
+  retryAt?: number;
 }
 
 /**

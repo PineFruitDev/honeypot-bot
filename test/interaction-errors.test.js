@@ -37,6 +37,7 @@ function fakeGuild() {
     id: GUILD,
     name: 'Test Guild',
     ownerId: 'owner',
+    members: { me: null },
     client: { user: { id: 'bot-user' } },
     channels: { cache: new Map() },
     roles: { cache: new Map([[HIDE_ROLE, { id: HIDE_ROLE, name: 'Hide Honeypot' }]]) }
@@ -48,6 +49,9 @@ function fakeButton(customId, { member = null } = {}) {
   const sent = [];
   const interaction = {
     type: 3,
+    id: 'interaction-1',
+    channelId: 'trap-channel',
+    message: { id: 'sticky-1' },
     customId,
     guild: fakeGuild(),
     guildId: GUILD,
@@ -107,6 +111,7 @@ beforeEach(async () => {
   await GuildConfigStore.init(dataDir);
   await PendingActionStore.init(dataDir);
   bot = new Bot('unused-token');
+  bot.markReady();
 });
 
 afterEach(async () => {
@@ -129,7 +134,7 @@ test('a button on a trap that has been removed gets an answer, not silence', asy
 
 test('a handler that throws still answers the user, with a reference for staff', async () => {
   const store = GuildConfigStore.getInstance();
-  await store.setTrap(GUILD, { channelId: 'trap-channel', action: 'kick' });
+  await store.setTrap(GUILD, { channelId: 'trap-channel', messageId: 'sticky-1', action: 'kick' });
   store.getCatchTotal = () => {
     throw new Error('the stats read blew up');
   };
@@ -147,7 +152,7 @@ test('a handler that throws still answers the user, with a reference for staff',
 
 test('the hide button defers before it touches the Discord API', async () => {
   const store = GuildConfigStore.getInstance();
-  await store.setTrap(GUILD, { channelId: 'trap-channel', hideRoleId: HIDE_ROLE, action: 'kick' });
+  await store.setTrap(GUILD, { channelId: 'trap-channel', messageId: 'sticky-1', hideRoleId: HIDE_ROLE, action: 'kick' });
 
   let deferredFirst = false;
   const interaction = fakeButton(BUTTON_IDS.hide, {
@@ -168,7 +173,7 @@ test('the hide button defers before it touches the Discord API', async () => {
 
 test('a hide that fails tells the user what to ask an admin for', async () => {
   const store = GuildConfigStore.getInstance();
-  await store.setTrap(GUILD, { channelId: 'trap-channel', hideRoleId: HIDE_ROLE, action: 'kick' });
+  await store.setTrap(GUILD, { channelId: 'trap-channel', messageId: 'sticky-1', hideRoleId: HIDE_ROLE, action: 'kick' });
 
   const interaction = fakeButton(BUTTON_IDS.hide, {
     member: fakeMember(async () => {
@@ -185,7 +190,7 @@ test('a hide that fails tells the user what to ask an admin for', async () => {
 test('a hide with no role configured answers instead of leaving the press hanging', async () => {
   const store = GuildConfigStore.getInstance();
   // A trap set up before the hide role existed, or one whose role was deleted.
-  await store.setTrap(GUILD, { channelId: 'trap-channel', action: 'kick' });
+  await store.setTrap(GUILD, { channelId: 'trap-channel', messageId: 'sticky-1', action: 'kick' });
 
   const interaction = fakeButton(BUTTON_IDS.hide, { member: fakeMember(async () => {}) });
   bot.getClient().emit(Events.InteractionCreate, interaction);
@@ -196,7 +201,7 @@ test('a hide with no role configured answers instead of leaving the press hangin
 
 test('an interaction that dies mid-reply does not take the process down', async () => {
   const store = GuildConfigStore.getInstance();
-  await store.setTrap(GUILD, { channelId: 'trap-channel', action: 'kick' });
+  await store.setTrap(GUILD, { channelId: 'trap-channel', messageId: 'sticky-1', action: 'kick' });
   store.getCatchTotal = () => {
     throw new Error('the stats read blew up');
   };

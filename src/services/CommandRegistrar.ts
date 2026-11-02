@@ -235,7 +235,7 @@ export class CommandRegistrar {
     const where = describeTarget(this.target);
 
     const file = await this.readState();
-    const record = file.targets[targetKey(this.target)];
+    const record = this.ownRecord(file);
 
     if (!force && record?.hash === hash) {
       this.logger.info(
@@ -278,7 +278,7 @@ export class CommandRegistrar {
    */
   public async rollback(): Promise<RegistrationResult | null> {
     const file = await this.readState();
-    const record = file.targets[targetKey(this.target)];
+    const record = this.ownRecord(file);
     const previous = record?.previous;
 
     if (!previous?.payload) {
@@ -332,8 +332,7 @@ export class CommandRegistrar {
       return { outcome: 'failed', target: this.target, hash: '', count: 0, error };
     }
 
-    delete file.targets[key];
-    await this.writeState(file);
+    await this.commitRecord(file, { hash: this.fingerprint([]), count: 0, payload: [] });
 
     this.logger.info(`clear - ${where} now has no application commands`);
     return { outcome: 'cleared', target: this.target, hash: '', count: 0 };
@@ -385,9 +384,14 @@ export class CommandRegistrar {
     return { added, removed, modified, baselineUnknown: false };
   }
 
+  private ownRecord(file: RegistrationFile): TargetRecord | undefined {
+    const record = file.targets[targetKey(this.target)];
+    return record?.clientId === this.options.clientId ? record : undefined;
+  }
+
   private async readRecord(): Promise<TargetRecord | undefined> {
     const file = await this.readState();
-    return file.targets[targetKey(this.target)];
+    return this.ownRecord(file);
   }
 
   /**
@@ -401,7 +405,7 @@ export class CommandRegistrar {
     written: { hash: string; count: number; payload: unknown[] }
   ): Promise<void> {
     const key = targetKey(this.target);
-    const current = file.targets[key];
+    const current = this.ownRecord(file);
 
     file.targets[key] = {
       hash: written.hash,
@@ -439,12 +443,7 @@ export class CommandRegistrar {
     try {
       raw = await fs.readFile(this.statePath, 'utf-8');
     } catch (error: any) {
-      if (error?.code !== 'ENOENT') {
-        this.logger.warn(
-          'readState - Could not read the registration record, treating every target as unregistered:',
-          error
-        );
-      }
+      if (error?.code !== 'ENOENT') throw new Error('Registration state is unreadable; restore it before registering');
       return { version: STATE_VERSION, targets: {} };
     }
 
@@ -460,7 +459,8 @@ export class CommandRegistrar {
   private parseState(parsed: unknown): RegistrationFile {
     const record = parsed as Partial<RegistrationFile> & Partial<TargetRecord>;
 
-    if (record?.targets && typeof record.targets === 'object') {
+    if (record?.version !== undefined && record.version !== STATE_VERSION) throw new Error('Unsupported registration state version');
+    if (record?.targets && typeof record.targets === 'object' && !Array.isArray(record.targets)) {
       return { version: record.version ?? STATE_VERSION, targets: record.targets };
     }
 

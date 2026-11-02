@@ -70,7 +70,7 @@ test('a complete environment resolves with the documented defaults', () => {
   assert.equal(config.discordClientId, CLIENT_ID);
   assert.equal(config.nodeEnv, 'production', 'NODE_ENV defaults to production');
   assert.equal(config.dataDir, 'data');
-  assert.equal(config.registerOnBoot, true);
+  assert.equal(config.devGuildId, undefined);
   assert.deepEqual(config.developerIds, []);
   assert.equal(config.isProduction, true);
   assert.equal(config.isDevelopment, false);
@@ -168,26 +168,15 @@ test('NODE_ENV is normalized and drives the derived flags', () => {
   assert.equal(process.env.NODE_ENV, 'development', 'direct readers see the normalized value');
 });
 
-test('REGISTER_ON_BOOT accepts the usual spellings of a boolean', () => {
-  for (const [raw, expected] of [
-    ['true', true],
-    ['TRUE', true],
-    ['1', true],
-    ['yes', true],
-    ['false', false],
-    ['False', false],
-    ['0', false],
-    ['off', false]
-  ]) {
-    Environment.reset();
-    setEnv(validEnv({ REGISTER_ON_BOOT: raw }));
-    assert.equal(Environment.validate().registerOnBoot, expected, `${raw} parses as ${expected}`);
-  }
+test('DEV_GUILD_ID is optional and validates a supplied test guild', () => {
+  setEnv(validEnv({ DEV_GUILD_ID: '111111111111111111' }));
+  assert.equal(Environment.validate().devGuildId, '111111111111111111');
 });
 
-test('a non-boolean REGISTER_ON_BOOT fails instead of being read as false', () => {
-  const error = expectFailure(validEnv({ REGISTER_ON_BOOT: 'maybe' }));
-  assert.match(error.message, /REGISTER_ON_BOOT: is not a boolean/);
+test('a malformed DEV_GUILD_ID is rejected without echoing it', () => {
+  const error = expectFailure(validEnv({ DEV_GUILD_ID: 'bad-guild-value' }));
+  assert.match(error.message, /DEV_GUILD_ID/);
+  assert.ok(!error.message.includes('bad-guild-value'));
 });
 
 test('a DATA_DIR that cannot be a path is rejected', () => {
@@ -202,7 +191,7 @@ test('no configured value appears anywhere in the failure message', () => {
     DISCORD_CLIENT_ID: 'leaked-client-4Kd82',
     NODE_ENV: 'leaked-env-Vb91',
     DATA_DIR: 'leaked-dir-\nMq44',
-    REGISTER_ON_BOOT: 'leaked-bool-Zt06',
+    DEV_GUILD_ID: 'leaked-guild-Zt06',
     DEVELOPER_IDS: 'leaked-dev-Hn73'
   };
 
@@ -253,7 +242,7 @@ test('the startup summary never reproduces the token', () => {
   Environment.validate();
 
   const output = written.join('\n');
-  assert.ok(output.includes('Discord token: present'), 'presence is reported');
+  assert.ok(output.includes('Discord credential is configured'), 'presence is reported');
   assert.ok(!output.includes(FAKE_TOKEN), 'the token is not logged');
   // Not even the ends of it: a masked secret is still part of a live credential.
   assert.ok(!output.includes(FAKE_TOKEN.slice(0, 6)), 'nor the start of it');

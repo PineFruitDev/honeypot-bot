@@ -38,6 +38,7 @@ let dataDir;
 let bots = [];
 const realHideFromRoles = HoneypotService.applyHideFromRoles;
 const realRefreshSticky = HoneypotService.refreshSticky;
+const realBanReason = DiscordApi.banReason;
 const realIsMemberBanned = DiscordApi.isMemberBanned;
 const realSoftbanUnban = DiscordApi.softbanUnban;
 const realBanMember = DiscordApi.banMember;
@@ -61,6 +62,7 @@ function fakeGuild(id, { sent = [], withLogChannel = true } = {}) {
     client: { user: { id: 'bot-user' } },
     channels: { cache: channels },
     roles: { cache: new Map() },
+    members: { me: null },
     sent
   };
 }
@@ -80,6 +82,11 @@ beforeEach(async () => {
   await GuildConfigStore.init(dataDir);
   await PendingActionStore.init(dataDir);
   bots = [];
+  DiscordApi.isMemberBanned = async () => false;
+  DiscordApi.banReason = async (guildId, userId) => {
+    const record = PendingActionStore.getInstance().listForGuild(guildId).find(r => r.userId === userId);
+    return record ? `[honeypot:${record.id}] test softban` : null;
+  };
   HoneypotService.refreshSticky = async () => {};
 });
 
@@ -88,6 +95,7 @@ afterEach(async () => {
   HoneypotService.applyHideFromRoles = realHideFromRoles;
   HoneypotService.refreshSticky = realRefreshSticky;
   DiscordApi.isMemberBanned = realIsMemberBanned;
+  DiscordApi.banReason = realBanReason;
   DiscordApi.softbanUnban = realSoftbanUnban;
   DiscordApi.banMember = realBanMember;
   GuildConfigStore.instance = null;

@@ -11,21 +11,21 @@ Built on the [TSTemplateBot](https://github.com/PineFruitDev/TSTemplateBot) arch
 - **Hide For Humans**: One green button hides the channel for that member and does nothing else. No ban, no fuss
 - **Four Actions**: Kick, ban, one-week timeout, or quarantine, picked per server
 - **Kick Means Softban**: A kick is carried out as a ban with a 7-day purge followed by a verified unban, so the member is removed *and* their spam is wiped from every channel, without a permanent ban
-- **Young Account Escalation**: Accounts under seven days old are banned no matter what the configured action is, because spam rings cycle throwaways
+- **Young Account Escalation**: Message catches from accounts under seven days old escalate to a ban, because spam rings cycle throwaways
 - **Exemptions**: The server owner is always safe, and you can exempt any user or role
 - **Action Reports**: An embed to your log channel for every catch: who, what they did, what happened, and anything left for you to do by hand
 - **Sticky Trap**: The trap message is re-posted after each catch with a live counter, so it never scrolls out of sight
 - **Hide From Roles**: Keep the trap out of your staff's channel list entirely
 - **No Privileged Intents**: Runs on Guilds and Guild Messages, so there is nothing to request in the Developer Portal, and no Administrator permission either
 - **Checks Before It Acts**: Channel overrides are verified at setup, and role position before every catch, so staff get "my role is below theirs" instead of the word "failed"
-- **Multi-Server**: Fully per-guild. One instance serves any number of servers, each with its own trap and settings
-- **Production Ready**: Environment validation, contextual logging, restart-safe config, and a test suite
+- **Multi-Server**: Fully per-guild. One process keeps separate trap settings for each server; hosting capacity must be measured
+- **Reliability checks**: Validated configuration, bounded admission, recovery journals, and automated tests. Hosted acceptance is still required
 
 ## How It Works
 
 The trap is an ordinary text channel with two permission overwrites: `@everyone` gets View and Read History, and the **Hide Honeypot** role is denied View. Send Messages is deliberately left alone, because the whole point is that posting is possible.
 
-The bot watches `MessageCreate`. Anything posted in a trap channel by anyone other than itself is a catch: the message is deleted first to blunt a flood, then the configured action runs. Message Content is never requested, since knowing *that* someone posted is enough.
+The bot watches `MessageCreate`. Member notices are ignored, and webhook posts are removed without punishing a user. Other trap posts pass the configured exemptions before deletion and enforcement. Message Content is never requested, since knowing *that* someone posted is enough.
 
 **A kick is a softban.** Discord's kick removes the member but leaves their messages everywhere. A ban with `delete_message_seconds` set to seven days removes them *and* wipes the spam server wide, so the bot bans, lets the purge land, then lifts the ban. The net effect is a kick that also cleans up.
 
@@ -119,9 +119,9 @@ Setup refuses two things on purpose. It will not trap your **system or rules cha
 | `kick` | Softban: ban with a 7-day purge, then unban. Removes them and wipes their messages. They can rejoin |
 | `ban` | Permanent ban with a 7-day purge |
 | `timeout` | One-week Discord timeout. They stay in the server but cannot speak |
-| `quarantine` | Applies a **Quarantined** role. On first use the bot creates the role and denies it View and Send on every channel it can manage, so the role actually contains |
+| `quarantine` | Applies a **Quarantined** role. On first use the bot creates the role and denies it View and Send on every channel it can manage, and checks effective visibility after assignment. If another permission still allows access, the action reports failure. New channels require operator review |
 
-Whatever you pick, an account **under seven days old** is banned instead. The trap buttons always kick rather than applying the configured action, so a misclick is recoverable.
+For message catches, an account **under seven days old** is banned instead. The trap buttons always kick rather than applying the configured action, so a misclick is recoverable.
 
 ## Permissions and intents
 
@@ -285,3 +285,13 @@ See the LICENSE file for the full text.
 3. Commit your changes
 4. Push to the branch
 5. Create a Pull Request
+
+## Release and data handling
+
+See [the release checklist](docs/release.md) for deployment prerequisites and verified limits.
+The bot does not read message bodies for detection and requests no Message Content intent.
+It does retain guild settings, Discord identifiers, up to 50 recent catch records per guild
+(including user tags, action, source and time), lifetime counters, and unresolved softban
+recovery records. Logs contain correlation identifiers. Removing a guild deletes its live
+configuration and catch history; the previous-file backup and unresolved recovery records
+may remain. Operators must define retention for host logs and external backups.

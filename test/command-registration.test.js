@@ -201,7 +201,7 @@ test('plan reports no change when the target already holds the payload', async (
   assert.deepEqual(plan.modified, []);
 });
 
-test('clearing the dev guild sends an empty set and forgets the record', async () => {
+test('clearing the dev guild sends an empty set and retains rollback', async () => {
   const commands = [fakeCommand('honeypot')];
   const api = fakeApi();
 
@@ -212,7 +212,7 @@ test('clearing the dev guild sends an empty set and forgets the record', async (
   assert.deepEqual(api.calls.at(-1), { target: GUILD, body: [] });
 
   const state = await readState();
-  assert.equal(state.targets[targetKey(GUILD)], undefined);
+  assert.deepEqual(state.targets[targetKey(GUILD)].payload, []);
 
   // And the next registration to that guild is a real call again, not a skip.
   const again = await registrar(commands, GUILD, api).register();
@@ -229,7 +229,7 @@ test('clearing one target leaves the other registered', async () => {
 
   const state = await readState();
   assert.ok(state.targets[targetKey(GLOBAL)], 'global survives a dev guild cleanup');
-  assert.equal(state.targets[targetKey(GUILD)], undefined);
+  assert.deepEqual(state.targets[targetKey(GUILD)].payload, []);
 });
 
 test('rollback re-sends the payload the target held before', async () => {

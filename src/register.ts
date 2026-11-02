@@ -40,6 +40,8 @@ interface Options {
 /** Nothing here is worth a dependency; the flag set is six long. */
 function parseArgs(argv: string[]): Options | { usage: true; error?: string } {
   const options: Options = { action: 'register', force: false };
+  const actions = argv.filter(arg => ['--dry-run', '--clear', '--rollback'].includes(arg));
+  if (actions.length > 1) return { usage: true, error: 'Pick one action; --dry-run cannot be combined with --clear or --rollback' };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -60,6 +62,7 @@ function parseArgs(argv: string[]): Options | { usage: true; error?: string } {
         if (!guildId) {
           return { usage: true, error: '--guild needs an ID, or DEV_GUILD_ID set in the environment' };
         }
+        if (!/^\d{17,20}$/.test(guildId)) return { usage: true, error: '--guild requires a valid Discord guild ID' };
         options.target = { scope: 'guild', guildId };
         break;
       }
@@ -136,7 +139,7 @@ async function registerCommands() {
 
   if ('usage' in parsed) {
     if (parsed.error) logger.error(`registerCommands - ${parsed.error}`);
-    console.log(USAGE);
+    logger.info(USAGE);
     process.exit(parsed.error ? 2 : 0);
   }
 

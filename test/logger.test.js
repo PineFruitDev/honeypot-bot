@@ -46,6 +46,8 @@ function capturing(options = {}) {
   return { logger, lines };
 }
 
+process.env.LOG_FORMAT = 'text';
+
 // --- levels ---------------------------------------------------------------------------
 
 test('a level threshold drops everything below it', () => {
