@@ -104,7 +104,8 @@ export class GuildConfigStore {
   public static async init(dataDir: string): Promise<GuildConfigStore> {
     if (!GuildConfigStore.instance) {
       GuildConfigStore.instance = new GuildConfigStore(dataDir);
-      await GuildConfigStore.instance.load();
+      try { await GuildConfigStore.instance.load(); }
+      catch (error) { GuildConfigStore.instance = null; throw error; }
     }
     return GuildConfigStore.instance;
   }
@@ -116,49 +117,90 @@ export class GuildConfigStore {
   private async load(): Promise<void> {
     try {
       const raw = await fs.readFile(this.filePath, 'utf-8');
-      const parsed = JSON.parse(raw) as StoreShape & { totals?: Record<string, number> };
-      this.data = { guilds: parsed.guilds ?? {} };
+      const parsed = JSON.parse(raw);
+      if (parsed.version !== undefined && parsed.version !== 1) throw new Error('Unsupported guild store version');
+      // Legacy files already used a guild map. Never broadcast an unscoped global trap.
+      if (!parsed.guilds || typeof parsed.guilds !== 'object' || Array.isArray(parsed.guilds)) {
+        throw new Error('Legacy global config must be assigned to an explicit guild before migration');
+      }
+      this.data = { guilds: parsed.guilds };
       this.totals = parsed.totals ?? {};
-      // Defensive: an older file may predate any of these fields.
+      this.validate();
       for (const [guildId, config] of Object.entries(this.data.guilds)) {
-        if (!config.catches) config.catches = [];
-        if (this.totals[guildId] === undefined) this.totals[guildId] = config.catches.length;
+        config.action ??= DEFAULT_HONEYPOT_ACTION;
+        config.catches ??= [];
+        this.totals[guildId] ??= config.catches.length;
       }
       this.logger.info(`load - Loaded config for ${Object.keys(this.data.guilds).length} guild(s)`);
     } catch (error: any) {
       if (error?.code === 'ENOENT') {
         this.logger.info('load - No existing config file, starting fresh');
       } else {
-        this.logger.error('load - Failed to read config file, starting fresh:', error);
+        throw new Error('Guild storage is unreadable or invalid; restore it before starting');
       }
       this.data = { guilds: {} };
       this.totals = {};
     }
   }
 
-  /** Serialize writes so concurrent catches never interleave on the file. */
-  private persist(): Promise<void> {
-    this.writeChain = this.writeChain
-      .then(async () => {
-        await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-        await fs.writeFile(
-          this.filePath,
-          JSON.stringify({ guilds: this.data.guilds, totals: this.totals }, null, 2),
-          'utf-8'
-        );
-      })
-      .catch(error => {
-        this.logger.error('persist - Failed to write config file:', error);
-      });
-    return this.writeChain;
+  private validate(): void {
+    const object = (v: unknown) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    if (!object(this.totals)) throw new Error('Invalid totals');
+    for (const [id, c] of Object.entries(this.data.guilds)) {
+      if (!/^\d+$/.test(id) || !object(c) || typeof c.channelId !== 'string' || !c.channelId) throw new Error('Invalid guild config');
+      if (c.action !== undefined && !isHoneypotAction(c.action)) throw new Error('Invalid action');
+      for (const key of ['hideRoleId', 'messageId', 'logChannelId', 'quarantineRoleId'] as const) {
+        if (c[key] !== undefined && typeof c[key] !== 'string') throw new Error('Invalid channel or role');
+      }
+      if (c.createdByBot !== undefined && typeof c.createdByBot !== 'boolean') throw new Error('Invalid ownership');
+      for (const key of ['hideFromRoleIds', 'appliedHideRoleIds', 'exemptUserIds', 'exemptRoleIds'] as const) {
+        if (c[key] !== undefined && (!Array.isArray(c[key]) || !c[key]!.every(v => typeof v === 'string'))) throw new Error('Invalid IDs');
+      }
+      if (c.catches !== undefined && (!Array.isArray(c.catches) || c.catches.length > 50 || !c.catches.every(r =>
+        object(r) && typeof r.userId === 'string' && typeof r.userTag === 'string' &&
+        (isHoneypotAction(r.action) || r.action === 'none') && typeof r.escalated === 'boolean' &&
+        ['message', 'button'].includes(r.source) && typeof r.caughtAt === 'string' && Number.isFinite(Date.parse(r.caughtAt))))) throw new Error('Invalid catches');
+    }
+    for (const [id, total] of Object.entries(this.totals)) {
+      if (!Object.hasOwn(this.data.guilds, id) || !Number.isSafeInteger(total) || total < (this.data.guilds[id].catches?.length ?? 0)) throw new Error('Invalid total');
+    }
   }
 
+  private async persist(): Promise<void> {
+    this.validate();
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const temporary = this.filePath + '.tmp';
+    try {
+      const handle = await fs.open(temporary, 'w', 0o600);
+      try {
+        await handle.writeFile(JSON.stringify({ version: 1, guilds: this.data.guilds, totals: this.totals }, null, 2));
+        await handle.sync();
+      } finally { await handle.close(); }
+      try { await fs.copyFile(this.filePath, this.filePath + '.bak'); }
+      catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+      await fs.rename(temporary, this.filePath);
+    } finally { await fs.rm(temporary, { force: true }); }
+  }
+
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.writeChain.then(async () => {
+      const data = structuredClone(this.data);
+      const totals = { ...this.totals };
+      try { return await operation(); }
+      catch (error) { this.data = data; this.totals = totals; throw error; }
+    });
+    this.writeChain = result.then(() => {}, () => {});
+    return result;
+  }
+
+  public async drain(): Promise<void> { await this.writeChain; }
+
   public getGuild(guildId: string): GuildConfig | undefined {
-    return this.data.guilds[guildId];
+    return structuredClone(this.data.guilds[guildId]);
   }
 
   public getAllGuilds(): Array<{ guildId: string; config: GuildConfig }> {
-    return Object.entries(this.data.guilds).map(([guildId, config]) => ({ guildId, config }));
+    return Object.entries(this.data.guilds).map(([guildId, config]) => ({ guildId, config: structuredClone(config) }));
   }
 
   /** True when this channel is the guild's trap. */
@@ -171,55 +213,66 @@ export class GuildConfigStore {
     guildId: string,
     trap: Pick<GuildConfig, 'channelId' | 'hideRoleId' | 'createdByBot' | 'messageId' | 'action'>
   ): Promise<void> {
+    return this.mutate(async () => {
     const existing = this.data.guilds[guildId];
-    this.data.guilds[guildId] = {
-      ...trap,
-      logChannelId: existing?.logChannelId,
-      hideFromRoleIds: existing?.hideFromRoleIds,
-      // A new channel carries none of the old one's overwrites, so ownership resets.
-      appliedHideRoleIds: [],
-      exemptUserIds: existing?.exemptUserIds,
-      exemptRoleIds: existing?.exemptRoleIds,
-      quarantineRoleId: existing?.quarantineRoleId,
-      catches: existing?.catches ?? []
-    };
-    await this.persist();
+      this.data.guilds[guildId] = {
+        ...structuredClone(trap),
+        action: trap.action ?? DEFAULT_HONEYPOT_ACTION,
+        logChannelId: existing?.logChannelId,
+        hideFromRoleIds: existing?.hideFromRoleIds,
+        // A new channel carries none of the old one's overwrites, so ownership resets.
+        appliedHideRoleIds: [],
+        exemptUserIds: existing?.exemptUserIds,
+        exemptRoleIds: existing?.exemptRoleIds,
+        quarantineRoleId: existing?.quarantineRoleId,
+        catches: existing?.catches ?? []
+      };
+      await this.persist();
+    });
   }
 
   /** Forget a guild entirely, putting the bot back where it was before `/honeypot setup`. */
   public async removeGuild(guildId: string): Promise<void> {
+    return this.mutate(async () => {
     if (!this.data.guilds[guildId]) return;
-    delete this.data.guilds[guildId];
-    delete this.totals[guildId];
-    await this.persist();
+      delete this.data.guilds[guildId];
+      delete this.totals[guildId];
+      await this.persist();
+    });
   }
 
   public async patchGuild(guildId: string, patch: Partial<GuildConfig>): Promise<void> {
+    return this.mutate(async () => {
     const config = this.data.guilds[guildId];
-    if (!config) return;
-    Object.assign(config, patch);
-    await this.persist();
+      if (!config) return;
+      Object.assign(config, structuredClone(patch));
+      await this.persist();
+    });
   }
 
   public async setStickyMessage(guildId: string, messageId: string | undefined): Promise<void> {
+    return this.mutate(async () => {
     const config = this.data.guilds[guildId];
-    if (!config) return;
-    config.messageId = messageId;
-    await this.persist();
+      if (!config) return;
+      config.messageId = messageId;
+      await this.persist();
+    });
   }
 
   /** Record a catch and return the guild's new lifetime total. */
   public async recordCatch(guildId: string, record: CatchRecord): Promise<number> {
+    return this.mutate(async () => {
     const config = this.data.guilds[guildId];
-    if (!config) return this.totals[guildId] ?? 0;
-    if (!config.catches) config.catches = [];
-    config.catches.push(record);
-    if (config.catches.length > CATCH_HISTORY_LIMIT) {
-      config.catches = config.catches.slice(-CATCH_HISTORY_LIMIT);
-    }
-    this.totals[guildId] = (this.totals[guildId] ?? 0) + 1;
-    await this.persist();
-    return this.totals[guildId];
+      if (!config) return this.totals[guildId] ?? 0;
+      if (!config.catches) config.catches = [];
+      config.catches.push(structuredClone(record));
+      if (config.catches.length > CATCH_HISTORY_LIMIT) {
+        config.catches = config.catches.slice(-CATCH_HISTORY_LIMIT);
+      }
+      this.totals[guildId] = (this.totals[guildId] ?? 0) + 1;
+      await this.persist();
+      return this.totals[guildId];
+    });
   }
 
   /** Lifetime catch count, which outlives the trimmed history. */
@@ -229,7 +282,7 @@ export class GuildConfigStore {
 
   public getRecentCatches(guildId: string, limit = 5): CatchRecord[] {
     const catches = this.data.guilds[guildId]?.catches ?? [];
-    return catches.slice(-limit).reverse();
+    return structuredClone(catches.slice(-limit).reverse());
   }
 
   /** Counts by action across the retained history, for the stats breakdown. */

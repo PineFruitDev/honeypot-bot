@@ -146,3 +146,45 @@ test('a missing config file starts clean instead of throwing', async () => {
   const store = await freshStore();
   assert.deepEqual(store.getAllGuilds(), []);
 });
+
+test('two guilds stay isolated during competing mutations and reads', async () => {
+  const store = await freshStore();
+  const other = '222222222222222222';
+  await Promise.all([store.setTrap(GUILD, { channelId: 'one' }), store.setTrap(other, { channelId: 'two' })]);
+  assert.equal(store.getGuild(GUILD).action, 'kick');
+  const copy = store.getGuild(other);
+  copy.channelId = 'changed';
+  await Promise.all([store.patchGuild(GUILD, { action: 'ban' }), store.removeGuild(GUILD), store.patchGuild(GUILD, { action: 'timeout' })]);
+  const reopened = await reopenStore();
+  assert.equal(reopened.getGuild(GUILD), undefined);
+  assert.equal(reopened.getGuild(other).channelId, 'two');
+});
+
+test('corruption fails closed and leaves the file intact', async () => {
+  const file = path.join(dataDir, 'guilds.json');
+  await fs.writeFile(file, '{broken');
+  await assert.rejects(freshStore());
+  assert.equal(GuildConfigStore.getInstance(), null);
+  assert.equal(await fs.readFile(file, 'utf8'), '{broken');
+});
+
+test('failed persistence rejects and rolls back; later writes recover', async () => {
+  const store = await freshStore();
+  await store.setTrap(GUILD, { channelId: 'one' });
+  const temporary = path.join(dataDir, 'guilds.json.tmp');
+  await fs.mkdir(temporary);
+  await assert.rejects(store.patchGuild(GUILD, { action: 'ban' }));
+  assert.equal(store.getGuild(GUILD).action, 'kick');
+  await fs.rmdir(temporary);
+  await store.patchGuild(GUILD, { action: 'timeout' });
+  assert.equal((await reopenStore()).getGuild(GUILD).action, 'timeout');
+});
+
+test('legacy keyed storage receives defaults and a version on write', async () => {
+  await fs.writeFile(path.join(dataDir, 'guilds.json'), JSON.stringify({ guilds: { [GUILD]: { channelId: 'old' } } }));
+  const store = await freshStore();
+  assert.equal(store.getGuild(GUILD).action, 'kick');
+  await store.patchGuild(GUILD, { logChannelId: 'log' });
+  assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'guilds.json'), 'utf8')).version, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'guilds.json.bak'), 'utf8')).guilds[GUILD].channelId, 'old');
+});
