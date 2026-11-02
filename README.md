@@ -16,7 +16,8 @@ Built on the [TSTemplateBot](https://github.com/PineFruitDev/TSTemplateBot) arch
 - **Action Reports**: An embed to your log channel for every catch: who, what they did, what happened, and anything left for you to do by hand
 - **Sticky Trap**: The trap message is re-posted after each catch with a live counter, so it never scrolls out of sight
 - **Hide From Roles**: Keep the trap out of your staff's channel list entirely
-- **No Privileged Intents**: Runs on Guilds and Guild Messages, so there is nothing to request in the Developer Portal
+- **No Privileged Intents**: Runs on Guilds and Guild Messages, so there is nothing to request in the Developer Portal, and no Administrator permission either
+- **Checks Before It Acts**: Channel overrides are verified at setup, and role position before every catch, so staff get "my role is below theirs" instead of the word "failed"
 - **Multi-Server**: Fully per-guild. One instance serves any number of servers, each with its own trap and settings
 - **Production Ready**: Environment validation, contextual logging, restart-safe config, and a test suite
 
@@ -58,7 +59,7 @@ DATA_DIR=data                    # Optional
 DEV_GUILD_ID=your_test_guild_id  # Optional, but required to register commands outside production
 ```
 
-> **Required Discord setup:** invite the bot with **Manage Channels**, **Manage Roles**, **Ban Members**, **Moderate Members**, **View Channels** and **Send Messages**, and place its role **above** the members it will be acting on. No privileged intents are needed.
+> **Required Discord setup:** invite the bot with the scopes and permissions in [Permissions and intents](#permissions-and-intents), and place its role **above** the members it will be acting on. No privileged intents are needed, and the bot never asks for Administrator.
 
 ### 3. Register the commands
 
@@ -120,14 +121,58 @@ Setup refuses two things on purpose. It will not trap your **system or rules cha
 
 Whatever you pick, an account **under seven days old** is banned instead. The trap buttons always kick rather than applying the configured action, so a misclick is recoverable.
 
+## Permissions and intents
+
+Invite the bot with two scopes, `bot` and `applications.commands`, and nothing else. **Do not grant Administrator.** The list below is everything the bot uses, and it is shorter than Administrator by design: a trap channel is not a reason to hand a bot the keys to the server.
+
+| Permission | What needs it |
+|------------|---------------|
+| View Channel | Seeing the trap and the log channel at all |
+| Send Messages | The sticky trap message, and the action report |
+| Embed Links | Both of those are embeds, and without this they post as nothing |
+| Read Message History | The safety check that refuses to convert a channel people are still using. Required either way, so a converted channel can be checked |
+| Manage Messages | Deleting the spam. Removing somebody else's message needs this specifically |
+| Manage Channels | Creating the trap channel, setting its topic, writing its overwrites |
+| Manage Roles | Creating and handing out **Hide Honeypot**, and **Quarantined** if you use it |
+| Ban Members | Bans, the softban a kick is carried out as, and the young-account escalation |
+| Timeout Members | The Timeout action only. Leave it off if you never use timeouts. Discord's API calls this `ModerateMembers` |
+
+**Kick Members is not needed.** The `kick` action is carried out as a ban with a purge followed by an unban, so Discord's own kick is never called.
+
+**Ban Members is worth granting even on a Timeout or Quarantine server**, because an account under seven days old is escalated to a ban whatever the configured action is, and the trap buttons always kick. It is not required: without it a timeout trap still times people out, it just will not escalate, and setup tells you so rather than leaving you to find out from a report.
+
+All of these have to be held by the bot's **role**, not just granted on the trap channel. A channel the bot creates gets overwrites for `@everyone` and the hide role only, and none for the bot itself, so setup refuses a role that is short of any of them. You can still tighten things with channel overrides on *other* channels; what you cannot do is grant them on the trap channel alone and leave the role without them.
+
+Quarantine reaches furthest: locking the role down writes a deny overwrite on every channel the bot can manage, so Manage Channels has to be broad for it to contain anyone.
+
+### What gets checked, and when
+
+A server-wide permission check is not proof the bot can act. A channel override can take back what the role grants, and Discord's role hierarchy sits above every permission, so a bot with Ban Members still cannot touch someone whose highest role outranks its own. Both come back from the API as the same error, after the attempt. So:
+
+- `/honeypot setup` checks the server permissions, the **effective** permissions inside a channel you are converting, and whether the hide role is actually assignable. The permission gaps are reported together in one reply rather than one per attempt.
+- `/honeypot config log-channel:` refuses a channel the bot cannot post an embed in, rather than letting every future report vanish.
+- Each catch is checked before anything happens to anyone. If the action cannot land, the report says which permission is missing or whose role is in the way, and nobody is DMed that they were banned when they were not.
+- `/honeypot` re-checks that you hold **Administrator** on every run. The registered default is a default, and a server admin can override it per role or per channel. Note the trade-off: delegating `/honeypot` to a non-administrator role through Server Settings > Integrations no longer works, because the runtime check is what decides.
+
+### Gateway intents
+
+The bot connects with **Guilds** and **GuildMessages**. Both are unprivileged, so there is nothing to enable in the Developer Portal and no verification threshold tied to them.
+
+None of the three privileged intents are requested, and `src/core/intents.ts` refuses to build a client that would request one, so this cannot regress quietly:
+
+- **Message Content** is not needed, because the trap fires on the fact that someone posted, never on what they wrote.
+- **Server Members** is not needed, because the member object (roles included) arrives inside the message and interaction payloads, which is everywhere the bot reads roles.
+- **Presence** is not needed, because the bot never looks at who is online.
+
 ## Project Structure
 
 ```
 src/
 ├── core/
 │   ├── Bot.ts                  # Client, trap events, button handling
-│   ├── Command.ts              # Abstract command base
-│   └── CommandManager.ts       # Command management
+│   ├── Command.ts              # Abstract command base, operator authorization
+│   ├── CommandManager.ts       # Command management
+│   └── intents.ts              # ← The two gateway intents, and the privileged-intent guard
 ├── commands/
 │   ├── index.ts                # ← Command registry (single source of truth)
 │   ├── HoneypotCommand.ts      # setup / config / status / stats / remove
@@ -136,6 +181,7 @@ src/
 ├── services/
 │   ├── HoneypotService.ts      # ← Trap provisioning, overwrites, sticky message
 │   ├── EnforcementService.ts   # ← Catch → action → record → report
+│   ├── BotPermissions.ts       # ← Required permissions, channel and hierarchy checks
 │   ├── DiscordApi.ts           # Ban/unban REST, softban retry logic
 │   ├── GuildConfigStore.ts     # Per-guild config + catch history
 │   ├── CommandRegistrar.ts     # Global/guild command registration, per-target fingerprints
@@ -198,7 +244,9 @@ npm run register -- --rollback --global  # Re-send the payload global held befor
 ## Notes
 
 - Config lives in a JSON file under `DATA_DIR`, so the trap survives restarts. Back that directory up, or mount it, if your host wipes the working directory on deploy
-- The bot's role must sit **above** anyone it acts on. A doomed ban fails loudly in the action report rather than silently
+- The bot's role must sit **above** anyone it acts on. A doomed action is refused before it is attempted and the action report names the reason, rather than reporting a bare failure
+- `src/core/Command.ts` has a `userPermissions` field. Anything a command must only ever do for an operator belongs there, so the check runs against the interaction rather than resting on the registered default
+- All commands are registered for **server installs in server contexts only**, so nothing appears in DMs where there is no guild to configure and no permission model to check against
 - The action report is never posted to the trap itself. It names the offender, and the trap is a public channel
 - The catch history is capped at the 50 most recent per server; the lifetime counter keeps counting past that
 - Other bots are fair game. Scam bots are bots, so only the server owner, the bot itself, and your configured exemptions are skipped

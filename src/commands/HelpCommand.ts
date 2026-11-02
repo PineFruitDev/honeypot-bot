@@ -1,5 +1,7 @@
 import {
+  ApplicationIntegrationType,
   EmbedBuilder,
+  InteractionContextType,
   MessageFlags,
   SlashCommandBuilder,
   type ChatInputCommandInteraction
@@ -14,7 +16,11 @@ import { ACCENT } from '../config/honeypotText.js';
 export class HelpCommand extends Command {
   public readonly data = new SlashCommandBuilder()
     .setName('help')
-    .setDescription('Show the available commands and what they do');
+    .setDescription('Show the available commands and what they do')
+    // Server installs only, like every other command here. The help text is about
+    // configuring a server, so there is nothing for it to say in a DM.
+    .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall);
 
   public readonly helpInfo: CommandHelpInfo = {
     name: 'help',

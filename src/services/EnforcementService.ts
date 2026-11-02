@@ -1,6 +1,5 @@
 import {
   ChannelType,
-  PermissionFlagsBits,
   type Guild,
   type GuildMember,
   type Role,
@@ -13,6 +12,12 @@ import {
   type HoneypotAction
 } from './GuildConfigStore.js';
 import { HoneypotService } from './HoneypotService.js';
+import {
+  actionBlockedReason,
+  missingGuildPermissions,
+  permissionsForAction,
+  roleHierarchyIssue
+} from './BotPermissions.js';
 import { Logger } from './Logger.js';
 import { QUARANTINE_ROLE_NAME, actionReportEmbed, offenderDmEmbed } from '../config/honeypotText.js';
 
@@ -30,6 +35,12 @@ export interface CatchOutcome {
   escalated: boolean;
   result: ActionResult;
   skipped: boolean;
+  /**
+   * Set when the action was refused before it was attempted, because the bot lacks the
+   * permission or sits below the target in the role hierarchy. The sentence an admin
+   * needs, rather than the 50013 they would otherwise get.
+   */
+  blockedReason?: string;
 }
 
 /**
@@ -84,51 +95,67 @@ export class EnforcementService {
     let finalAction: HoneypotAction | 'none' = action;
     let unbanFailed = false;
 
-    try {
-      switch (action) {
-        case 'ban':
-          result = await DiscordApi.banMember(guild.id, user.id, reason, PURGE_SECONDS);
-          break;
-
-        case 'kick': {
-          // A kick is carried out as a softban: ban with a 7 day purge, then unban. The net
-          // effect is a kick, but it also wipes the spam from every channel in one call,
-          // which a plain kick cannot do. If the ban fails there is nothing to undo.
-          result = await DiscordApi.banMember(
-            guild.id,
-            user.id,
-            `${reason} [softban: kick and purge]`,
-            PURGE_SECONDS
-          );
-          if (result === 'success') {
-            const unban = await DiscordApi.softbanUnban(guild.id, user.id);
-            if (unban.unbanFailed) {
-              unbanFailed = true;
-              this.logger.error(
-                `handleCatch - Softban unban FAILED for ${user.id} in ${guild.id}: ${unban.detail}. The member is still banned though the configured action was kick`
-              );
-            }
-          }
-          break;
-        }
-
-        case 'timeout':
-          result = await this.timeoutMember(member, reason);
-          break;
-
-        case 'quarantine': {
-          const quarantined = await this.quarantineMember(guild, member, reason);
-          result = quarantined;
-          if (quarantined !== 'success') finalAction = 'none';
-          break;
-        }
-      }
-    } catch (error) {
-      this.logger.error(`handleCatch - Action threw for ${user.id} in ${guild.id}:`, error);
-      result = 'error';
+    // Prove the action can land before taking it. Discord reports "you lack the permission"
+    // and "your role is below theirs" with the same 50013, and only after the attempt, so
+    // without this check staff see the word "failed" and no way to tell which it was.
+    const blockedReason = actionBlockedReason(guild, action, member);
+    if (blockedReason) {
+      this.logger.error(
+        `handleCatch - Refusing ${action} for ${user.id} in ${guild.id} before attempting it: ${blockedReason}`
+      );
+      result = 'missing_perms';
+      finalAction = 'none';
     }
 
-    if (result === 'missing_perms' || result === 'error') {
+    // A blocked catch still gets recorded and reported below, so staff see both the catch
+    // and the one thing they have to fix for the next one to land.
+    if (!blockedReason) {
+      try {
+        switch (action) {
+          case 'ban':
+            result = await DiscordApi.banMember(guild.id, user.id, reason, PURGE_SECONDS);
+            break;
+
+          case 'kick': {
+            // A kick is carried out as a softban: ban with a 7 day purge, then unban. The net
+            // effect is a kick, but it also wipes the spam from every channel in one call,
+            // which a plain kick cannot do. If the ban fails there is nothing to undo.
+            result = await DiscordApi.banMember(
+              guild.id,
+              user.id,
+              `${reason} [softban: kick and purge]`,
+              PURGE_SECONDS
+            );
+            if (result === 'success') {
+              const unban = await DiscordApi.softbanUnban(guild.id, user.id);
+              if (unban.unbanFailed) {
+                unbanFailed = true;
+                this.logger.error(
+                  `handleCatch - Softban unban FAILED for ${user.id} in ${guild.id}: ${unban.detail}. The member is still banned though the configured action was kick`
+                );
+              }
+            }
+            break;
+          }
+
+          case 'timeout':
+            result = await this.timeoutMember(member, reason);
+            break;
+
+          case 'quarantine': {
+            const quarantined = await this.quarantineMember(guild, member, reason);
+            result = quarantined;
+            if (quarantined !== 'success') finalAction = 'none';
+            break;
+          }
+        }
+      } catch (error) {
+        this.logger.error(`handleCatch - Action threw for ${user.id} in ${guild.id}:`, error);
+        result = 'error';
+      }
+    }
+
+    if (!blockedReason && (result === 'missing_perms' || result === 'error')) {
       // Say this loudly in the console as well as the log channel. The permission that
       // blocks a ban often blocks posting the report too, so the report alone can vanish.
       this.logger.error(
@@ -151,7 +178,11 @@ export class EnforcementService {
     // A courtesy, and best effort by design. Opening a DM channel with someone who has
     // just been banned usually fails unless one already existed, which for a throwaway
     // spam account it will not. Worth attempting for the humans who trip this by accident.
-    await this.dmOffender(user, guild, action, trigger, escalated);
+    // Skipped when the action was refused: telling someone they were banned when they were
+    // not is worse than telling them nothing.
+    if (!blockedReason) {
+      await this.dmOffender(user, guild, action, trigger, escalated);
+    }
 
     await this.postReport({
       guild,
@@ -160,10 +191,11 @@ export class EnforcementService {
       trigger,
       escalated,
       failed: result === 'missing_perms' || result === 'error',
-      unbanFailed
+      unbanFailed,
+      blockedReason
     });
 
-    return { action: finalAction, escalated, result, skipped: false };
+    return { action: finalAction, escalated, result, skipped: false, blockedReason: blockedReason ?? undefined };
   }
 
   /**
@@ -221,6 +253,15 @@ export class EnforcementService {
     if (!member) return 'error';
     const role = await this.ensureQuarantineRole(guild);
     if (!role) return 'missing_perms';
+
+    // The role can exist and still be unusable: someone may have dragged Quarantined above
+    // the bot's own role since it was created, which Manage Roles does not override.
+    const hierarchy = roleHierarchyIssue(guild, role);
+    if (hierarchy) {
+      this.logger.error(`quarantineMember - Cannot assign the quarantine role in ${guild.id}: ${hierarchy}`);
+      return 'missing_perms';
+    }
+
     try {
       await member.roles.add(role, reason);
       return 'success';
@@ -307,6 +348,8 @@ export class EnforcementService {
     escalated: boolean;
     failed: boolean;
     unbanFailed: boolean;
+    /** Set when nothing was attempted, and says exactly what has to be granted or moved. */
+    blockedReason?: string | null;
   }): Promise<void> {
     const config = GuildConfigStore.getInstance()?.getGuild(opts.guild.id);
     if (!config?.logChannelId) return;
@@ -331,7 +374,8 @@ export class EnforcementService {
             trigger: opts.trigger,
             escalated: opts.escalated,
             failed: opts.failed,
-            unbanFailed: opts.unbanFailed
+            unbanFailed: opts.unbanFailed,
+            blockedReason: opts.blockedReason ?? undefined
           })
         ]
       });
@@ -345,17 +389,14 @@ export class EnforcementService {
     await HoneypotService.refreshSticky(guild);
   }
 
-  /** Does the bot hold the permissions the configured action needs? Used by setup. */
+  /**
+   * Does the bot hold the server-wide permissions the configured action needs?
+   *
+   * The definitions live in BotPermissions so that setup, the per-catch gate and the
+   * README checklist cannot drift apart.
+   */
   public static missingPermissionsFor(guild: Guild, action: HoneypotAction): string[] {
-    const me = guild.members.me;
-    if (!me) return [];
-    const needed: Array<[bigint, string]> = [];
-    if (action === 'ban' || action === 'kick') {
-      needed.push([PermissionFlagsBits.BanMembers, 'Ban Members']);
-    }
-    if (action === 'timeout') needed.push([PermissionFlagsBits.ModerateMembers, 'Timeout Members']);
-    if (action === 'quarantine') needed.push([PermissionFlagsBits.ManageRoles, 'Manage Roles']);
-    return needed.filter(([flag]) => !me.permissions.has(flag)).map(([, name]) => name);
+    return missingGuildPermissions(guild, permissionsForAction(action));
   }
 }
 

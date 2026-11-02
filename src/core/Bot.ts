@@ -5,12 +5,19 @@ import {
   GatewayIntentBits,
   GuildMember,
   MessageFlags,
+  PermissionFlagsBits,
   type Interaction,
   type Message
 } from 'discord.js';
 import { Command } from './Command.js';
 import { CommandManager } from './CommandManager.js';
+import {
+  REQUIRED_INTENTS,
+  assertLeastPrivilegeIntents,
+  describeIntents
+} from './intents.js';
 import { Logger } from '../services/Logger.js';
+import { roleHierarchyIssue, missingGuildPermissions } from '../services/BotPermissions.js';
 import { GuildConfigStore } from '../services/GuildConfigStore.js';
 import { EnforcementService } from '../services/EnforcementService.js';
 import { HoneypotService } from '../services/HoneypotService.js';
@@ -24,6 +31,7 @@ export class Bot {
   private logger = new Logger({ context: 'Bot' });
   private client: Client;
   private commandManager: CommandManager;
+  private intents: GatewayIntentBits[];
 
   constructor(
     private token: string,
@@ -31,14 +39,14 @@ export class Bot {
     /**
      * Guilds and GuildMessages only, so the bot needs no privileged intents at all.
      *
-     * Message Content is not requested because the trap only needs to know that someone
-     * posted, never what they wrote. Server Members is not requested either: the member
-     * object arrives inside the message and interaction payloads, which is everywhere this
-     * bot looks at roles.
+     * The list and the reasoning behind it live in `core/intents.ts`, which also refuses
+     * a privileged intent outright rather than letting one reach the gateway.
      */
-    intents: GatewayIntentBits[] = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+    intents: readonly GatewayIntentBits[] = REQUIRED_INTENTS
   ) {
-    this.client = new Client({ intents });
+    assertLeastPrivilegeIntents(intents);
+    this.intents = [...intents];
+    this.client = new Client({ intents: this.intents });
     this.commandManager = new CommandManager(commands);
     this.setupEventListeners();
   }
@@ -46,6 +54,11 @@ export class Bot {
   private setupEventListeners(): void {
     this.client.once(Events.ClientReady, () => {
       this.logger.info(`setupEventListeners - Bot logged in as ${this.client.user?.tag}`);
+      // Stated at startup so an operator can confirm from the log alone that nothing
+      // privileged is being requested, without opening the Developer Portal.
+      this.logger.info(
+        `setupEventListeners - Gateway intents: ${describeIntents(this.intents)}. No privileged intents requested.`
+      );
     });
 
     this.client.on(Events.MessageCreate, message => {
@@ -166,11 +179,37 @@ export class Bot {
     const config = GuildConfigStore.getInstance()?.getGuild(interaction.guild.id);
     if (!config?.hideRoleId) return;
 
-    const role = interaction.guild.roles.cache.get(config.hideRoleId);
+    const guild = interaction.guild;
+    const role = guild.roles.cache.get(config.hideRoleId);
     const member = interaction.member instanceof GuildMember ? interaction.member : null;
-    if (!role || !member) {
+    if (!role) {
       await interaction.reply({
-        content: "I couldn't hide the channel. Ask an admin to check my Manage Roles permission.",
+        content:
+          "I couldn't hide the channel: the **Hide Honeypot** role is gone. Ask an admin to run `/honeypot setup` again.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+    if (!member) {
+      await interaction.reply({
+        content: "I couldn't read your server profile, so I can't hide the channel. Try again in a moment.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    // Checked before the REST call, so a member who presses this gets told what is actually
+    // wrong instead of a generic "check my Manage Roles permission" that may be a red herring.
+    const missing = missingGuildPermissions(guild, [
+      [PermissionFlagsBits.ManageRoles, 'Manage Roles']
+    ]);
+    const blocked = missing.length
+      ? `I do not have the **${missing.join('**, **')}** permission in this server.`
+      : roleHierarchyIssue(guild, role);
+    if (blocked) {
+      this.logger.warn(`handleHide - Cannot hide for ${interaction.user.id} in ${guild.id}: ${blocked}`);
+      await interaction.reply({
+        content: `I couldn't hide the channel. ${blocked} Ask an admin to sort that out.`,
         flags: MessageFlags.Ephemeral
       });
       return;
@@ -186,7 +225,8 @@ export class Bot {
       this.logger.error(`handleHide - Could not add the hide role for ${interaction.user.id}:`, error);
       await interaction
         .reply({
-          content: "I couldn't hide the channel. Ask an admin to check my Manage Roles permission.",
+          content:
+            "I couldn't hide the channel. Ask an admin to check my **Manage Roles** permission and that my role sits above **Hide Honeypot**.",
           flags: MessageFlags.Ephemeral
         })
         .catch(() => {});
