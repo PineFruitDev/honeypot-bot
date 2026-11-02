@@ -22,7 +22,7 @@ export interface BotConfig {
   discordClientId: string;
   nodeEnv: NodeEnv;
   dataDir: string;
-  registerOnBoot: boolean;
+  devGuildId?: string;
   developerIds: string[];
   isDevelopment: boolean;
   isProduction: boolean;
@@ -86,8 +86,6 @@ const PLACEHOLDERS = new Set([
   'todo'
 ]);
 
-const BOOLEAN_TRUE = new Set(['true', '1', 'yes', 'on']);
-const BOOLEAN_FALSE = new Set(['false', '0', 'no', 'off']);
 const NODE_ENVS: readonly NodeEnv[] = ['development', 'production', 'test'];
 
 function parseToken(raw: string): ParseResult<string> {
@@ -161,13 +159,6 @@ function parseNodeEnv(raw: string): ParseResult<NodeEnv> {
   return { ok: true, value: lowered as NodeEnv, normalized: lowered };
 }
 
-function parseBoolean(raw: string): ParseResult<boolean> {
-  const lowered = raw.toLowerCase();
-  if (BOOLEAN_TRUE.has(lowered)) return { ok: true, value: true, normalized: 'true' };
-  if (BOOLEAN_FALSE.has(lowered)) return { ok: true, value: false, normalized: 'false' };
-  return { ok: false, reason: 'is not a boolean (expected true or false)' };
-}
-
 function parseDataDir(raw: string): ParseResult<string> {
   if (raw.includes('\0')) {
     return { ok: false, reason: 'contains a null byte, which is not valid in a path' };
@@ -207,10 +198,10 @@ const SPECS: readonly ConfigKeySpec<unknown>[] = [
     parse: parseDataDir
   },
   {
-    key: 'REGISTER_ON_BOOT',
-    default: 'true',
-    expected: 'true or false',
-    parse: parseBoolean
+    key: 'DEV_GUILD_ID',
+    default: '',
+    expected: 'a test guild Discord ID, or empty',
+    parse: raw => raw ? parseSnowflake(raw) : { ok: true, value: undefined }
   },
   {
     key: 'DEVELOPER_IDS',
@@ -312,7 +303,7 @@ export class Environment {
       discordClientId: values.get('DISCORD_CLIENT_ID') as string,
       nodeEnv,
       dataDir: values.get('DATA_DIR') as string,
-      registerOnBoot: values.get('REGISTER_ON_BOOT') as boolean,
+      devGuildId: values.get('DEV_GUILD_ID') as string | undefined,
       developerIds: values.get('DEVELOPER_IDS') as string[],
       isDevelopment: nodeEnv === 'development',
       isProduction: nodeEnv === 'production'
@@ -372,7 +363,7 @@ export class Environment {
     this.logger.info(`validate - Discord client ID: ${config.discordClientId}`);
     this.logger.info('validate - Discord token: present');
     this.logger.info(`validate - Data directory: ${config.dataDir}`);
-    this.logger.info(`validate - Register commands on boot: ${config.registerOnBoot}`);
+    if (process.env.REGISTER_ON_BOOT) this.logger.warn('validate - REGISTER_ON_BOOT is ignored; register commands explicitly with npm run register.');
     this.logger.info(`validate - Developer IDs configured: ${config.developerIds.length}`);
   }
 }

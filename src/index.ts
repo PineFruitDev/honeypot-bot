@@ -4,7 +4,6 @@ import { Bot } from './core/Bot.js';
 import { Logger } from './services/Logger.js';
 import { Environment } from './services/Environment.js';
 import { GuildConfigStore } from './services/GuildConfigStore.js';
-import { CommandRegistrar } from './services/CommandRegistrar.js';
 import { ALL_COMMANDS } from './commands/index.js';
 
 const logger = new Logger({ context: 'Main Index' });
@@ -27,26 +26,14 @@ async function main() {
 
     const bot = new Bot(config.discordToken, ALL_COMMANDS);
 
-    // Once online: reconcile each trap against what is actually in the server, then make
-    // sure Discord is holding the command set this build ships. Reconciliation runs first
-    // because it is local and instant, while registration is a round trip.
+    // Once online, reconcile each trap against what is actually in the server.
+    //
+    // Commands are deliberately not registered here. Registration is a bulk overwrite
+    // against every installation at once, so it belongs to an operator running
+    // `npm run register` against a reviewed payload, not to whichever build the host
+    // happened to restart. Starting up does not change what Discord has registered.
     bot.getClient().once(Events.ClientReady, async () => {
       await bot.reconcileOnBoot();
-
-      if (!config.registerOnBoot) {
-        logger.info(
-          'Command registration on boot is off (REGISTER_ON_BOOT), run `npm run register` to do it by hand'
-        );
-        return;
-      }
-
-      // register() reports rather than throws: a bot that cannot reach the command API is
-      // still a working bot for every command already registered.
-      await new CommandRegistrar(ALL_COMMANDS, {
-        clientId: config.discordClientId,
-        dataDir: config.dataDir,
-        token: config.discordToken
-      }).register();
     });
 
     process.on('SIGINT', async () => {
