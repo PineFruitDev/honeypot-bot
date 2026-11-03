@@ -111,6 +111,11 @@ export class HoneypotService {
     channel: TextChannel,
     action: HoneypotAction
   ): Promise<ProvisionResult> {
+    // Read before the write below replaces it. The topic is the admin's own description of
+    // a channel the bot is only borrowing, and this is the last moment it can be recovered:
+    // nothing else in Discord keeps the old value.
+    const previousTopic = channel.topic ?? undefined;
+
     try {
       await channel.permissionOverwrites.edit(
         guild.roles.everyone,
@@ -139,7 +144,8 @@ export class HoneypotService {
       hideRoleId: hideRole.id,
       createdByBot: false,
       messageId,
-      action
+      action,
+      previousTopic
     });
     await this.applyHideFromRoles(guild);
     return { ok: true, channel, converted: true };
@@ -260,6 +266,11 @@ export class HoneypotService {
    * Tear the trap down: delete the channel if the bot made it, or un-convert one it
    * adopted. The stored config and the hide role go last and best effort, so a leftover
    * Discord artifact can never wedge the config into an unusable state.
+   *
+   * Un-converting restores the topic conversion replaced. "Back to normal" is what the
+   * admin is told, and the config this reads is deleted a few lines later, so a topic not
+   * put back here is gone: the channel keeps the empty description forever with nothing
+   * left anywhere that knows what used to be there.
    */
   public static async remove(guild: Guild): Promise<{ removed: boolean; converted: boolean }> {
     const store = GuildConfigStore.getInstance();
@@ -284,7 +295,9 @@ export class HoneypotService {
               .delete(config.hideRoleId, 'Honeypot removed')
               .catch(() => {});
           }
-          await channel.setTopic(null, 'Honeypot removed');
+          // A channel that genuinely had no topic is recorded as having none, so it gets
+          // none back rather than an empty string.
+          await channel.setTopic(config.previousTopic ?? null, 'Honeypot removed');
         } catch (error) {
           this.logger.error(`remove - Could not fully un-convert ${channel.id}:`, error);
         }
