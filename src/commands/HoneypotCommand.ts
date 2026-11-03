@@ -290,6 +290,27 @@ export class HoneypotCommand extends Command {
       return;
     }
 
+    // Refused up front, before anything is written.
+    //
+    // applyHideFromRoles deliberately never writes an overwrite for either of the trap's own
+    // two roles: a View-deny for @everyone would hide the trap from the bots and scammers it
+    // exists to catch, and the hide role already denies View. Accepting one of them here
+    // confirmed a hide that could never happen, and left an entry in hideFromRoleIds that
+    // `/honeypot status` went on reporting as hidden for good.
+    const hideFrom = interaction.options.getRole('hide-from');
+    if (hideFrom && hideFrom.id === guild.roles.everyone.id) {
+      await interaction.editReply(
+        'The trap has to stay visible to **@everyone**, or none of the bots and scammers it exists to catch can walk into it. Hide it from a specific role instead, and let individual members opt out with the **Hide Channel** button.'
+      );
+      return;
+    }
+    if (hideFrom && hideFrom.id === current.hideRoleId) {
+      await interaction.editReply(
+        `**${hideFrom.name}** is the role the **Hide Channel** button already hands out, so it hides the trap by itself. Pick a different role.`
+      );
+      return;
+    }
+
     const changes: string[] = [];
 
     const actionOption = interaction.options.getString('action');
@@ -332,7 +353,8 @@ export class HoneypotCommand extends Command {
       changes.push(`Action reports now go to <#${logChannel.id}>.`);
     }
 
-    const hideFrom = interaction.options.getRole('hide-from');
+    // show-to is not restricted the same way: a list poisoned by an earlier version still has
+    // to be clearable, and dropping a role that was never hidden is harmless.
     const showTo = interaction.options.getRole('show-to');
     if (hideFrom || showTo) {
       const hidden = new Set(current.hideFromRoleIds ?? []);
