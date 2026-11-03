@@ -210,7 +210,7 @@ export class HoneypotService {
    * boot. The bot only removes what it put there.
    *
    * Fails safe in both directions: a failed edit leaves the trap more hidden than intended
-   * rather than exposed, and a failed delete is retried on the next run because the role
+   * rather than exposed, and a failed cleanup is retried on the next run because the role
    * stays on the applied list.
    */
   public static async applyHideFromRoles(guild: Guild): Promise<void> {
@@ -242,11 +242,16 @@ export class HoneypotService {
       }
     }
 
-    // Only roles the bot added and the admin has since dropped.
+    // Clear only visibility for roles the admin has dropped; other permission bits
+    // may belong to the admin and must survive.
     for (const roleId of applied) {
       if (wanted.includes(roleId)) continue;
       try {
-        await channel.permissionOverwrites.delete(roleId, 'Honeypot: no longer hidden from role');
+        await channel.permissionOverwrites.edit(
+          roleId,
+          { ViewChannel: null },
+          { reason: 'Honeypot: no longer hidden from role' }
+        );
         stillApplied.delete(roleId);
       } catch (error) {
         this.logger.error(`applyHideFromRoles - Could not clear overwrite ${roleId}:`, error);

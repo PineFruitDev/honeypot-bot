@@ -83,7 +83,7 @@ test('a configured role gets a View-deny and is recorded as applied', async () =
   assert.deepEqual(store.getGuild(GUILD).appliedHideRoleIds, ['staff']);
 });
 
-test('a role dropped from the list has its overwrite removed', async () => {
+test('a role dropped from the list has its visibility override cleared', async () => {
   const store = GuildConfigStore.getInstance();
   await store.patchGuild(GUILD, { hideFromRoleIds: ['staff'], appliedHideRoleIds: ['staff'] });
 
@@ -91,7 +91,8 @@ test('a role dropped from the list has its overwrite removed', async () => {
   await store.patchGuild(GUILD, { hideFromRoleIds: [] });
   await HoneypotService.applyHideFromRoles(createGuild(['staff']));
 
-  assert.deepEqual(deleted, ['staff']);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(edited, ['staff']);
   assert.deepEqual(store.getGuild(GUILD).appliedHideRoleIds, []);
 });
 
@@ -132,4 +133,25 @@ test('the trap\'s own overwrites are never candidates for cleanup', async () => 
 
   assert.deepEqual(edited, []);
   assert.deepEqual(deleted, []);
+});
+
+
+test('unhiding a role preserves unrelated channel permissions', async () => {
+  const store = GuildConfigStore.getInstance();
+  await store.patchGuild(GUILD, { hideFromRoleIds: [], appliedHideRoleIds: ['staff'] });
+  const guild = createGuild(['staff']);
+  const channel = guild.channels.cache.get('trap-1');
+  const permissions = { ViewChannel: false, SendMessages: false, AttachFiles: true };
+  channel.permissionOverwrites.edit = async (id, changes) => {
+    assert.equal(id, 'staff');
+    Object.assign(permissions, changes);
+  };
+  channel.permissionOverwrites.delete = async () => {
+    for (const key of Object.keys(permissions)) delete permissions[key];
+  };
+
+  await HoneypotService.applyHideFromRoles(guild);
+
+  assert.deepEqual(permissions, { ViewChannel: null, SendMessages: false, AttachFiles: true });
+  assert.deepEqual(store.getGuild(GUILD).appliedHideRoleIds, []);
 });
