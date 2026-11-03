@@ -49,6 +49,28 @@ export class HoneypotService {
   }
 
   /**
+   * Delete a hide role that a setup created and then could not use.
+   *
+   * `ensureHideRole` creates a fresh role every time it runs, deliberately: a role that
+   * merely shares the name is not proof the bot owns it. The cost is that a setup which
+   * fails after the role exists leaves it behind, and because nothing reuses it, a second
+   * attempt makes a second one. An admin trying a few candidate channels ends up with a
+   * role list full of identical **Hide Honeypot** entries, none of which hides anything,
+   * and no way to tell which one the trap would have used.
+   *
+   * Best effort, and it refuses to touch the role a trap is actually using: this only ever
+   * cleans up after a setup that never armed.
+   */
+  public static async discardHideRole(guild: Guild, role: Role): Promise<void> {
+    if (GuildConfigStore.getInstance()?.getGuild(guild.id)?.hideRoleId === role.id) return;
+    try {
+      await role.delete('Honeypot setup failed, discarding the unused hide role');
+    } catch (error) {
+      this.logger.error(`discardHideRole - Could not delete the unused role in ${guild.id}:`, error);
+    }
+  }
+
+  /**
    * The trap's base overwrites: everyone can see it and read it, and Send Messages is
    * deliberately left alone so a spam bot walks straight in. Members holding the hide role
    * cannot see it at all.
