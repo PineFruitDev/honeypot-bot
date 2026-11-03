@@ -290,44 +290,33 @@ export class HoneypotCommand extends Command {
       return;
     }
 
+    const actionOption = interaction.options.getString('action');
+    const logChannel = interaction.options.getChannel('log-channel') as TextChannel | null;
+
+    // Every refusal is decided here, before the first option is written.
+    //
+    // This subcommand takes several options in one run, and each one used to be validated
+    // where it was applied. So a run that refused a later option had already persisted an
+    // earlier one, then returned reporting only the refusal: `/honeypot config action:ban
+    // log-channel:#announcements`, with a channel the bot cannot post in, answered about the
+    // log channel and left the trap silently switched from Kick to Ban. The next person to
+    // trip it was banned rather than kicked, and nothing had said so.
+    const refusal = this.refuseConfig(guild, current, actionOption, logChannel);
+    if (refusal) {
+      await interaction.editReply(refusal);
+      return;
+    }
+
     const changes: string[] = [];
 
-    const actionOption = interaction.options.getString('action');
     if (isHoneypotAction(actionOption)) {
-      const missing = EnforcementService.missingPermissionsFor(guild, actionOption);
-      if (missing.length) {
-        await interaction.editReply(
-          `I can't apply a **${actionLabel(actionOption)}** without the **${missing.join(
-            '**, **'
-          )}** permission.`
-        );
-        return;
-      }
       await store.patchGuild(guild.id, { action: actionOption });
       changes.push(`Action is now **${actionLabel(actionOption)}**.`);
       const escalation = escalationWarning(guild, actionOption);
       if (escalation) changes.push(escalation);
     }
 
-    const logChannel = interaction.options.getChannel('log-channel') as TextChannel | null;
     if (logChannel) {
-      if (logChannel.id === current.channelId) {
-        await interaction.editReply(
-          'The log channel cannot be the trap itself. Reports name the offender, and the trap is public.'
-        );
-        return;
-      }
-      // Refused now rather than discovered later: a log channel the bot cannot post an
-      // embed in means every action report silently goes nowhere.
-      const missingThere = missingChannelPermissions(guild, logChannel, LOG_CHANNEL_PERMISSIONS);
-      if (missingThere.length) {
-        await interaction.editReply(
-          `I need the **${missingThere.join('**, **')}** permission in <#${
-            logChannel.id
-          }> to post action reports there. Grant it on that channel and run this again.`
-        );
-        return;
-      }
       await store.patchGuild(guild.id, { logChannelId: logChannel.id });
       changes.push(`Action reports now go to <#${logChannel.id}>.`);
     }
@@ -381,6 +370,45 @@ export class HoneypotCommand extends Command {
     await interaction.editReply(
       changes.length ? changes.join('\n') : 'Nothing to change. Pass at least one option.'
     );
+  }
+
+  /**
+   * The first reason to refuse this `/honeypot config` run, or null to go ahead.
+   *
+   * Split out so the whole run is decided before any of it is written. The options here are
+   * the two that can be refused; the hide and exemption lists are set operations on IDs the
+   * interaction already resolved, so there is nothing left to check by the time they apply.
+   */
+  private refuseConfig(
+    guild: Guild,
+    current: { channelId: string },
+    actionOption: string | null,
+    logChannel: TextChannel | null
+  ): string | null {
+    if (isHoneypotAction(actionOption)) {
+      const missing = EnforcementService.missingPermissionsFor(guild, actionOption);
+      if (missing.length) {
+        return `I can't apply a **${actionLabel(actionOption)}** without the **${missing.join(
+          '**, **'
+        )}** permission.`;
+      }
+    }
+
+    if (logChannel) {
+      if (logChannel.id === current.channelId) {
+        return 'The log channel cannot be the trap itself. Reports name the offender, and the trap is public.';
+      }
+      // Refused now rather than discovered later: a log channel the bot cannot post an
+      // embed in means every action report silently goes nowhere.
+      const missingThere = missingChannelPermissions(guild, logChannel, LOG_CHANNEL_PERMISSIONS);
+      if (missingThere.length) {
+        return `I need the **${missingThere.join('**, **')}** permission in <#${
+          logChannel.id
+        }> to post action reports there. Grant it on that channel and run this again.`;
+      }
+    }
+
+    return null;
   }
 
   private async status(interaction: ChatInputCommandInteraction, guild: Guild): Promise<void> {
