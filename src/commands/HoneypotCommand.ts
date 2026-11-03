@@ -205,6 +205,18 @@ export class HoneypotCommand extends Command {
       return;
     }
 
+    // Decided before anything is created. Refusing a conversion is the most common way for
+    // setup to end, and ensureHideRole makes a brand new role every time it runs, so asking
+    // this question second left one unusable **Hide Honeypot** role in the server per
+    // attempt: an admin working through a few candidate channels collects a pile of them.
+    if (existingChannel) {
+      const refusal = await this.refuseUnsafeConversion(guild, existingChannel);
+      if (refusal) {
+        await interaction.editReply(refusal);
+        return;
+      }
+    }
+
     const hideRole = await HoneypotService.ensureHideRole(guild);
     if (!hideRole) {
       await interaction.editReply(
@@ -217,6 +229,7 @@ export class HoneypotCommand extends Command {
     // case the Hide Channel button would fail for every member who pressed it.
     const hideRoleIssue = roleHierarchyIssue(guild, hideRole);
     if (hideRoleIssue) {
+      await HoneypotService.discardHideRole(guild, hideRole);
       await interaction.editReply(
         `I can't hand out the hide role, so the **Hide Channel** button would not work. ${hideRoleIssue}`
       );
@@ -229,13 +242,10 @@ export class HoneypotCommand extends Command {
     const note = escalation ? `\n\n${escalation}` : '';
 
     if (existingChannel) {
-      const refusal = await this.refuseUnsafeConversion(guild, existingChannel);
-      if (refusal) {
-        await interaction.editReply(refusal);
-        return;
-      }
-
       const result = await HoneypotService.convertExisting(guild, hideRole, existingChannel, action);
+      // The trap was never armed, so the role it would have used has no purpose and no
+      // record. Leaving it behind means the next attempt adds another one.
+      if (!result.ok) await HoneypotService.discardHideRole(guild, hideRole);
       await interaction.editReply(
         result.ok
           ? `Converted <#${existingChannel.id}> into the honeypot. Anyone who posts there gets a **${actionLabel(action)}**.${note}`
@@ -246,6 +256,7 @@ export class HoneypotCommand extends Command {
 
     const name = interaction.options.getString('name') ?? 'do-not-type-here';
     const result = await HoneypotService.deployNew(guild, hideRole, name, action);
+    if (!result.ok) await HoneypotService.discardHideRole(guild, hideRole);
     await interaction.editReply(
       result.ok
         ? `Honeypot armed in <#${result.channel.id}>. Anyone who posts there gets a **${actionLabel(action)}**.\n\nSet a log channel with \`/honeypot config log-channel:#your-channel\` so you see who it catches.${note}`
