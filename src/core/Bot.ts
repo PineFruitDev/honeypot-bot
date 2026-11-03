@@ -34,6 +34,23 @@ const DRAIN_TIMEOUT_MS = 5000;
 const DEAD_INTERACTION_CODES = new Set([10062, 40060]);
 
 /**
+ * What someone is told when admission control turns their interaction away.
+ *
+ * Refusing the *work* is correct: AbuseGuard serializes a guild's catches and holds a short
+ * per-user cooldown so a spam wave cannot become unbounded REST traffic. Refusing it
+ * *silently* is not. An interaction nobody answers is shown to the presser as "This
+ * interaction failed" three seconds later, so an admin who runs two `/honeypot` subcommands
+ * within the cooldown, or a member who presses Hide Channel while a catch is in flight, is
+ * told the bot is broken rather than busy.
+ *
+ * One ephemeral reply per refused interaction adds no amplification: it is bounded by the
+ * inbound interaction rate, which Discord already limits, and it does none of the REST work
+ * the refusal exists to prevent.
+ */
+const BUSY_MESSAGE =
+  "I'm already busy with something else in this server. Give it a few seconds and try again.";
+
+/**
  * Main Bot class: owns the Discord client, the command set, and the two events the trap
  * runs on: a message in the trap channel and a press on one of its buttons.
  *
@@ -279,7 +296,13 @@ export class Bot {
       return;
     }
     const release = this.guard.acquire(interaction.guild.id, interaction.user.id, interaction.id);
-    if (!release) return;
+    if (!release) {
+      log.warn('handleButton - Admission refused, answering the press rather than letting it expire', {
+        customId: interaction.customId
+      });
+      await this.respondEphemeral(interaction, BUSY_MESSAGE);
+      return;
+    }
     try {
       switch (interaction.customId) {
         case BUTTON_IDS.hide:
@@ -425,7 +448,11 @@ export class Bot {
     }
 
     const release = interaction.guildId ? this.guard.acquire(interaction.guildId, interaction.user.id, interaction.id) : null;
-    if (interaction.guildId && !release) return;
+    if (interaction.guildId && !release) {
+      log.warn('handleCommand - Admission refused, answering rather than letting the command expire');
+      await this.respondEphemeral(interaction, BUSY_MESSAGE);
+      return;
+    }
     try {
       const validation = await command.validate(interaction);
       if (!validation.valid) {
