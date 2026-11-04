@@ -5,7 +5,7 @@ import {
   type Role,
   type TextChannel
 } from 'discord.js';
-import { GuildConfigStore, type HoneypotAction } from './GuildConfigStore.js';
+import { GuildConfigStore, type GuildConfig, type HoneypotAction } from './GuildConfigStore.js';
 import { Logger } from './Logger.js';
 import { HIDE_ROLE_NAME, TRAP_TOPIC, trapButtons, trapEmbed } from '../config/honeypotText.js';
 
@@ -45,6 +45,28 @@ export class HoneypotService {
     } catch (error) {
       this.logger.error(`ensureHideRole - Could not create the role in ${guild.id}:`, error);
       return null;
+    }
+  }
+
+  /**
+   * Delete a hide role that a setup created and then could not use.
+   *
+   * `ensureHideRole` creates a fresh role every time it runs, deliberately: a role that
+   * merely shares the name is not proof the bot owns it. The cost is that a setup which
+   * fails after the role exists leaves it behind, and because nothing reuses it, a second
+   * attempt makes a second one. An admin trying a few candidate channels ends up with a
+   * role list full of identical **Hide Honeypot** entries, none of which hides anything,
+   * and no way to tell which one the trap would have used.
+   *
+   * Best effort, and it refuses to touch the role a trap is actually using: this only ever
+   * cleans up after a setup that never armed.
+   */
+  public static async discardHideRole(guild: Guild, role: Role): Promise<void> {
+    if (GuildConfigStore.getInstance()?.getGuild(guild.id)?.hideRoleId === role.id) return;
+    try {
+      await role.delete('Honeypot setup failed, discarding the unused hide role');
+    } catch (error) {
+      this.logger.error(`discardHideRole - Could not delete the unused role in ${guild.id}:`, error);
     }
   }
 
@@ -216,7 +238,7 @@ export class HoneypotService {
    * boot. The bot only removes what it put there.
    *
    * Fails safe in both directions: a failed edit leaves the trap more hidden than intended
-   * rather than exposed, and a failed delete is retried on the next run because the role
+   * rather than exposed, and a failed cleanup is retried on the next run because the role
    * stays on the applied list.
    */
   public static async applyHideFromRoles(guild: Guild): Promise<void> {
@@ -248,11 +270,16 @@ export class HoneypotService {
       }
     }
 
-    // Only roles the bot added and the admin has since dropped.
+    // Clear only visibility for roles the admin has dropped; other permission bits
+    // may belong to the admin and must survive.
     for (const roleId of applied) {
       if (wanted.includes(roleId)) continue;
       try {
-        await channel.permissionOverwrites.delete(roleId, 'Honeypot: no longer hidden from role');
+        await channel.permissionOverwrites.edit(
+          roleId,
+          { ViewChannel: null },
+          { reason: 'Honeypot: no longer hidden from role' }
+        );
         stillApplied.delete(roleId);
       } catch (error) {
         this.logger.error(`applyHideFromRoles - Could not clear overwrite ${roleId}:`, error);
@@ -263,14 +290,59 @@ export class HoneypotService {
   }
 
   /**
+   * Give back the visibility the per-role hides took away.
+   *
+   * `appliedHideRoleIds` is the bot's own record of the View-denies it wrote, and it is
+   * deleted along with the rest of the config on removal. So this is the last moment those
+   * overwrites can be identified at all: anything left behind here stays on the channel
+   * forever, on a channel the admin has just been told is back to normal, with nothing left
+   * anywhere that knows the bot put it there.
+   *
+   * Clears only the visibility bit. `applyHideFromRoles` writes with an edit, which merges
+   * into whatever the admin already had for that role on that channel, so deleting the whole
+   * overwrite would take their settings with it.
+   *
+   * Best effort per role: a role the bot can no longer edit must not stop the rest of the
+   * un-conversion.
+   */
+  private static async clearHideFromRoleOverwrites(
+    guild: Guild,
+    channel: TextChannel,
+    config: GuildConfig
+  ): Promise<void> {
+    // Provisioning owns these two, and the un-conversion below deals with them itself.
+    const reserved = new Set([guild.roles.everyone.id, config.hideRoleId].filter(Boolean));
+
+    for (const roleId of config.appliedHideRoleIds ?? []) {
+      if (reserved.has(roleId)) continue;
+      try {
+        await channel.permissionOverwrites.edit(
+          roleId,
+          { ViewChannel: null },
+          { reason: 'Honeypot removed' }
+        );
+      } catch (error) {
+        this.logger.error(
+          `clearHideFromRoleOverwrites - Could not restore visibility for ${roleId} in ${channel.id}:`,
+          error
+        );
+      }
+    }
+  }
+
+  /**
    * Tear the trap down: delete the channel if the bot made it, or un-convert one it
    * adopted. The stored config and the hide role go last and best effort, so a leftover
    * Discord artifact can never wedge the config into an unusable state.
    *
-   * Un-converting restores the topic conversion replaced. "Back to normal" is what the
-   * admin is told, and the config this reads is deleted a few lines later, so a topic not
-   * put back here is gone: the channel keeps the empty description forever with nothing
-   * left anywhere that knows what used to be there.
+   * Un-converting undoes every overwrite the bot wrote on that channel, the per-role hides
+   * included, and restores the topic conversion replaced. "Back to normal" is what the admin
+   * is told, so it has to be true for the roles the trap was hidden from as much as for
+   * @everyone.
+   *
+   * The config this reads is deleted a few lines later, so neither is recoverable afterwards:
+   * a topic not put back here is gone, and the channel keeps the empty description forever
+   * with nothing left anywhere that knows what used to be there.
    */
   public static async remove(guild: Guild): Promise<{ removed: boolean; converted: boolean }> {
     const store = GuildConfigStore.getInstance();
@@ -286,6 +358,8 @@ export class HoneypotService {
       if (converted) {
         try {
           if (config.messageId) await channel.messages.delete(config.messageId).catch(() => {});
+          // Before the config that records them is thrown away.
+          await this.clearHideFromRoleOverwrites(guild, channel, config);
           await channel.permissionOverwrites.delete(
             guild.roles.everyone,
             'Honeypot removed'

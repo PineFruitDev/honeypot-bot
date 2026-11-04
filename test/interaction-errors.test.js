@@ -17,6 +17,7 @@ import path from 'node:path';
 import { Events, GuildMember } from 'discord.js';
 
 import { Bot } from '../dist/core/Bot.js';
+import { PingCommand } from '../dist/commands/PingCommand.js';
 import { GuildConfigStore } from '../dist/services/GuildConfigStore.js';
 import { PendingActionStore } from '../dist/services/PendingActionStore.js';
 import { BUTTON_IDS } from '../dist/config/honeypotText.js';
@@ -45,11 +46,11 @@ function fakeGuild() {
 }
 
 /** A button interaction that records everything sent back to the user. */
-function fakeButton(customId, { member = null } = {}) {
+function fakeButton(customId, { member = null, id = 'interaction-1' } = {}) {
   const sent = [];
   const interaction = {
     type: 3,
-    id: 'interaction-1',
+    id,
     channelId: 'trap-channel',
     message: { id: 'sticky-1' },
     customId,
@@ -223,6 +224,84 @@ test('an interaction that dies mid-reply does not take the process down', async 
   }
 
   assert.deepEqual(rejections, [], 'a dead interaction is a non-event, not a crash');
+});
+
+// AbuseGuard admits one action per guild and holds a ten second per-user cooldown on top.
+// Turning the work away is the point of it; turning it away without answering is not, because
+// Discord shows the presser "This interaction failed" three seconds later and an admin reads
+// that as a broken bot rather than a busy one.
+
+test('a press refused by admission control is answered, not left to expire', async () => {
+  const store = GuildConfigStore.getInstance();
+  await store.setTrap(GUILD, { channelId: 'trap-channel', messageId: 'sticky-1', action: 'kick' });
+
+  const first = fakeButton(BUTTON_IDS.stats, { id: 'interaction-1' });
+  bot.getClient().emit(Events.InteractionCreate, first);
+  await waitFor(() => first.sent.length, 'the first stats reply');
+  assert.ok(first.sent.at(-1).embeds, 'the first press gets the stats view');
+
+  // Same user, same guild, well inside the cooldown. A distinct interaction ID, so this is
+  // the per-user cooldown refusing it rather than the event deduplication.
+  const second = fakeButton(BUTTON_IDS.stats, { id: 'interaction-2' });
+  bot.getClient().emit(Events.InteractionCreate, second);
+  await waitFor(() => second.sent.length, 'an answer to the refused press');
+
+  const reply = second.sent.at(-1);
+  assert.equal(reply.flags, EPHEMERAL, 'the trap is public, so this is never posted openly');
+  assert.match(reply.content, /busy/i);
+  assert.equal(reply.embeds, undefined, 'a refused press does no work, so there is nothing to show');
+});
+
+test('a command refused by admission control is answered, not left to expire', async () => {
+  // A real command, because an unknown one is answered before admission is even asked for.
+  await bot.stop().catch(() => {});
+  bot = new Bot('unused-token', [new PingCommand()]);
+  bot.markReady();
+
+  const fakeCommand = id => {
+    const interaction = {
+      type: 2,
+      id,
+      commandName: 'ping',
+      createdTimestamp: Date.now(),
+      guild: fakeGuild(),
+      guildId: GUILD,
+      user: { id: USER, tag: 'curious#0001' },
+      memberPermissions: { has: () => true },
+      client: { ws: { ping: 42 } },
+      replied: false,
+      deferred: false,
+      sent: [],
+      isButton: () => false,
+      isChatInputCommand: () => true,
+      isRepliable: () => true,
+      inGuild: () => true,
+      async reply(payload) {
+        interaction.replied = true;
+        interaction.sent.push(payload);
+      },
+      async followUp(payload) {
+        interaction.sent.push(payload);
+      },
+      async editReply(payload) {
+        interaction.sent.push(payload);
+      }
+    };
+    return interaction;
+  };
+
+  const first = fakeCommand('command-1');
+  bot.getClient().emit(Events.InteractionCreate, first);
+  await waitFor(() => first.sent.length >= 2, 'the ping reply');
+
+  // An admin running a second subcommand a moment later is the common case here.
+  const second = fakeCommand('command-2');
+  bot.getClient().emit(Events.InteractionCreate, second);
+  await waitFor(() => second.sent.length, 'an answer to the refused command');
+
+  assert.equal(second.sent.length, 1, 'the command itself never ran');
+  assert.equal(second.sent[0].flags, EPHEMERAL);
+  assert.match(second.sent[0].content, /busy/i);
 });
 
 test('an unknown command tells the user rather than failing silently', async () => {

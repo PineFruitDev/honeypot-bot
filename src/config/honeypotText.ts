@@ -168,8 +168,10 @@ export function actionReportEmbed(opts: {
     fields.push({
       name: 'Escalation',
       // Past tense only when it actually happened. Saying "was escalated to a full ban"
-      // next to "nothing was done" is the kind of contradiction that costs staff an hour.
-      value: opts.blockedReason
+      // next to "nothing was done" is the kind of contradiction that costs staff an hour,
+      // and a ban Discord refused is just as much a ban that did not happen as one the bot
+      // never attempted.
+      value: opts.blockedReason || opts.failed
         ? 'Account age under 7 days, so this would have been escalated to a full ban.'
         : 'Account age under 7 days, so this was escalated to a full ban.'
     });

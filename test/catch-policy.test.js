@@ -440,6 +440,69 @@ test('a closed DM never stops the action or the record', async () => {
   assert.equal(store.getCatchTotal(GUILD), 1);
 });
 
+/** Record every call as usual, but refuse it the way a 5xx from Discord would. */
+function stubFailingFetch() {
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ method: (init.method ?? 'GET').toUpperCase(), url: String(url), body: init.body });
+    return new Response(null, { status: 500 });
+  };
+}
+
+/** The named field of the action report that was posted, or undefined if there was none. */
+function reportField(name) {
+  return reports.at(-1)?.payload.embeds[0].data.fields.find(field => field.name === name);
+}
+
+test('an action Discord refused is recorded and reported as no action', async () => {
+  // The catch happened; the ban did not. Recording the attempted action makes the stats
+  // breakdown claim removals that never landed, and makes the report say "Banned, messages
+  // from the last 7 days purged" on the line directly above "Failed".
+  const store = await freshStore({ logChannelId: LOG_CHANNEL });
+  stubFailingFetch();
+
+  const outcome = await EnforcementService.handleCatch({
+    guild: createGuild({ channels: [createLogChannel(LOG_CHANNEL)] }),
+    user: createUser(ESTABLISHED),
+    member: createMember(ESTABLISHED),
+    trigger: 'sent a message in the honeypot channel',
+    source: 'message'
+  });
+
+  assert.equal(bans().length, 1, 'the ban was attempted');
+  assert.equal(outcome.result, 'error');
+  assert.equal(outcome.action, 'none');
+
+  // The catch still counts, because somebody did trip the trap.
+  assert.equal(store.getCatchTotal(GUILD), 1);
+  assert.equal(store.getRecentCatches(GUILD)[0].action, 'none');
+  assert.equal(store.getActionBreakdown(GUILD).ban, undefined);
+  assert.equal(store.getActionBreakdown(GUILD).none, 1);
+
+  const taken = reportField('Action taken');
+  assert.match(taken.value, /No action/);
+  assert.match(taken.value, /Failed/);
+  assert.doesNotMatch(taken.value, /purged/);
+  // Nothing landed, so there is nothing to apologise to the offender for.
+  assert.deepEqual(dms, []);
+});
+
+test('a failed escalation is not reported in the past tense', async () => {
+  await freshStore({ logChannelId: LOG_CHANNEL });
+  stubFailingFetch();
+
+  const outcome = await EnforcementService.handleCatch({
+    guild: createGuild({ channels: [createLogChannel(LOG_CHANNEL)] }),
+    user: createUser(THROWAWAY),
+    member: createMember(THROWAWAY),
+    trigger: 'sent a message in the honeypot channel',
+    source: 'message'
+  });
+
+  assert.equal(outcome.escalated, true);
+  assert.equal(outcome.action, 'none');
+  assert.match(reportField('Escalation').value, /would have been escalated/);
+});
+
 test('a young account pressing a decoy is softbanned without permanent escalation', async () => {
   await freshStore({ action: 'ban' });
   const outcome = await EnforcementService.handleCatch({ guild: createGuild(), user: createUser(THROWAWAY), member: createMember(THROWAWAY), trigger: 'pressed a trap button', source: 'button', requestedAction: 'kick' });
