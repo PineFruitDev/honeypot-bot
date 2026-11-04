@@ -46,6 +46,16 @@ export interface GuildConfig {
   createdByBot?: boolean;
   /** The sticky trap message, re-posted after each catch so it stays the newest message. */
   messageId?: string;
+  /**
+   * The topic a converted channel carried before the trap warning replaced it.
+   *
+   * The topic is the only piece of the channel's own content provisioning rewrites, and
+   * removal promises the channel is back to normal. Recorded here because conversion is the
+   * last moment it can be read at all: once the trap topic is written, the original exists
+   * nowhere. Absent means there was nothing to put back, which is not the same as an empty
+   * string.
+   */
+  previousTopic?: string;
   action?: HoneypotAction;
   /** Where action reports go. Unset means reports are logged to the console only. */
   logChannelId?: string;
@@ -153,6 +163,7 @@ export class GuildConfigStore {
         if (c[key] !== undefined && typeof c[key] !== 'string') throw new Error('Invalid channel or role');
       }
       if (c.createdByBot !== undefined && typeof c.createdByBot !== 'boolean') throw new Error('Invalid ownership');
+      if (c.previousTopic !== undefined && typeof c.previousTopic !== 'string') throw new Error('Invalid previous topic');
       for (const key of ['hideFromRoleIds', 'appliedHideRoleIds', 'exemptUserIds', 'exemptRoleIds'] as const) {
         if (c[key] !== undefined && (!Array.isArray(c[key]) || !c[key]!.every(v => typeof v === 'string'))) throw new Error('Invalid IDs');
       }
@@ -221,7 +232,7 @@ export class GuildConfigStore {
   /** Store or replace the trap for a guild, preserving settings that outlive a re-setup. */
   public async setTrap(
     guildId: string,
-    trap: Pick<GuildConfig, 'channelId' | 'hideRoleId' | 'createdByBot' | 'messageId' | 'action'>
+    trap: Pick<GuildConfig, 'channelId' | 'hideRoleId' | 'createdByBot' | 'messageId' | 'action' | 'previousTopic'>
   ): Promise<void> {
     return this.mutate(async () => {
     const existing = this.data.guilds[guildId];
