@@ -205,6 +205,18 @@ export class HoneypotCommand extends Command {
       return;
     }
 
+    // Decided before anything is created. Refusing a conversion is the most common way for
+    // setup to end, and ensureHideRole makes a brand new role every time it runs, so asking
+    // this question second left one unusable **Hide Honeypot** role in the server per
+    // attempt: an admin working through a few candidate channels collects a pile of them.
+    if (existingChannel) {
+      const refusal = await this.refuseUnsafeConversion(guild, existingChannel);
+      if (refusal) {
+        await interaction.editReply(refusal);
+        return;
+      }
+    }
+
     const hideRole = await HoneypotService.ensureHideRole(guild);
     if (!hideRole) {
       await interaction.editReply(
@@ -217,6 +229,7 @@ export class HoneypotCommand extends Command {
     // case the Hide Channel button would fail for every member who pressed it.
     const hideRoleIssue = roleHierarchyIssue(guild, hideRole);
     if (hideRoleIssue) {
+      await HoneypotService.discardHideRole(guild, hideRole);
       await interaction.editReply(
         `I can't hand out the hide role, so the **Hide Channel** button would not work. ${hideRoleIssue}`
       );
@@ -229,13 +242,10 @@ export class HoneypotCommand extends Command {
     const note = escalation ? `\n\n${escalation}` : '';
 
     if (existingChannel) {
-      const refusal = await this.refuseUnsafeConversion(guild, existingChannel);
-      if (refusal) {
-        await interaction.editReply(refusal);
-        return;
-      }
-
       const result = await HoneypotService.convertExisting(guild, hideRole, existingChannel, action);
+      // The trap was never armed, so the role it would have used has no purpose and no
+      // record. Leaving it behind means the next attempt adds another one.
+      if (!result.ok) await HoneypotService.discardHideRole(guild, hideRole);
       await interaction.editReply(
         result.ok
           ? `Converted <#${existingChannel.id}> into the honeypot. Anyone who posts there gets a **${actionLabel(action)}**.${note}`
@@ -246,6 +256,7 @@ export class HoneypotCommand extends Command {
 
     const name = interaction.options.getString('name') ?? 'do-not-type-here';
     const result = await HoneypotService.deployNew(guild, hideRole, name, action);
+    if (!result.ok) await HoneypotService.discardHideRole(guild, hideRole);
     await interaction.editReply(
       result.ok
         ? `Honeypot armed in <#${result.channel.id}>. Anyone who posts there gets a **${actionLabel(action)}**.\n\nSet a log channel with \`/honeypot config log-channel:#your-channel\` so you see who it catches.${note}`
@@ -292,6 +303,7 @@ export class HoneypotCommand extends Command {
 
     const actionOption = interaction.options.getString('action');
     const logChannel = interaction.options.getChannel('log-channel') as TextChannel | null;
+    const hideFrom = interaction.options.getRole('hide-from');
 
     // Every refusal is decided here, before the first option is written.
     //
@@ -301,7 +313,7 @@ export class HoneypotCommand extends Command {
     // log-channel:#announcements`, with a channel the bot cannot post in, answered about the
     // log channel and left the trap silently switched from Kick to Ban. The next person to
     // trip it was banned rather than kicked, and nothing had said so.
-    const refusal = this.refuseConfig(guild, current, actionOption, logChannel);
+    const refusal = this.refuseConfig(guild, current, actionOption, logChannel, hideFrom);
     if (refusal) {
       await interaction.editReply(refusal);
       return;
@@ -321,7 +333,8 @@ export class HoneypotCommand extends Command {
       changes.push(`Action reports now go to <#${logChannel.id}>.`);
     }
 
-    const hideFrom = interaction.options.getRole('hide-from');
+    // show-to is not restricted the same way: a list poisoned by an earlier version still has
+    // to be clearable, and dropping a role that was never hidden is harmless.
     const showTo = interaction.options.getRole('show-to');
     if (hideFrom || showTo) {
       const hidden = new Set(current.hideFromRoleIds ?? []);
@@ -376,15 +389,29 @@ export class HoneypotCommand extends Command {
    * The first reason to refuse this `/honeypot config` run, or null to go ahead.
    *
    * Split out so the whole run is decided before any of it is written. The options here are
-   * the two that can be refused; the hide and exemption lists are set operations on IDs the
-   * interaction already resolved, so there is nothing left to check by the time they apply.
+   * the three that can be refused; `show-to` and the exemption lists are set operations on
+   * IDs the interaction already resolved, so there is nothing left to check by the time they
+   * apply, and a list poisoned by an earlier version still has to be clearable.
    */
   private refuseConfig(
     guild: Guild,
-    current: { channelId: string },
+    current: { channelId: string; hideRoleId?: string },
     actionOption: string | null,
-    logChannel: TextChannel | null
+    logChannel: TextChannel | null,
+    hideFrom: { id: string; name: string } | null
   ): string | null {
+    // applyHideFromRoles deliberately never writes an overwrite for either of the trap's own
+    // two roles: a View-deny for @everyone would hide the trap from the bots and scammers it
+    // exists to catch, and the hide role already denies View. Accepting one of them here
+    // confirmed a hide that could never happen, and left an entry in hideFromRoleIds that
+    // `/honeypot status` went on reporting as hidden for good.
+    if (hideFrom && hideFrom.id === guild.roles.everyone.id) {
+      return 'The trap has to stay visible to **@everyone**, or none of the bots and scammers it exists to catch can walk into it. Hide it from a specific role instead, and let individual members opt out with the **Hide Channel** button.';
+    }
+    if (hideFrom && hideFrom.id === current.hideRoleId) {
+      return `**${hideFrom.name}** is the role the **Hide Channel** button already hands out, so it hides the trap by itself. Pick a different role.`;
+    }
+
     if (isHoneypotAction(actionOption)) {
       const missing = EnforcementService.missingPermissionsFor(guild, actionOption);
       if (missing.length) {

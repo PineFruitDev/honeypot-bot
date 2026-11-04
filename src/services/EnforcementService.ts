@@ -137,12 +137,9 @@ export class EnforcementService {
             result = await this.timeoutMember(member, reason);
             break;
 
-          case 'quarantine': {
-            const quarantined = await this.quarantineMember(guild, member, reason);
-            result = quarantined;
-            if (quarantined !== 'success') finalAction = 'none';
+          case 'quarantine':
+            result = await this.quarantineMember(guild, member, reason);
             break;
-          }
         }
       } catch (error) {
         log.error('handleCatch - Action threw', error, { action });
@@ -150,6 +147,13 @@ export class EnforcementService {
       }
 
     }
+
+    // An action that did not land is recorded and reported as 'none', whichever action it
+    // was. CatchRecord's contract is "what actually ran", so a history saying 'ban' for a
+    // ban Discord refused makes the /honeypot stats breakdown count removals that never
+    // happened, and puts "Banned, messages from the last 7 days purged" in the action
+    // report immediately above "Failed".
+    if (result !== 'success') finalAction = 'none';
 
     if (result === 'missing_perms' || result === 'error') {
       // Say this loudly in the console as well as the log channel. The permission that
