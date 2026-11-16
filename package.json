@@ -10,7 +10,9 @@
     "dev": "npm run build && node dist/index.js",
     "start": "node dist/index.js",
     "register": "npm run build && node dist/register.js",
-    "test": "npm run build && node --test \"test/**/*.test.js\""
+    "test": "npm run build && node --test \"test/**/*.test.js\"",
+    "test:coverage": "npm run build && node --experimental-test-coverage --test-coverage-include=\"dist/**/*.js\" --test \"test/**/*.test.js\"",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "discord",
