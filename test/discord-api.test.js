@@ -6,21 +6,24 @@ import { Logger } from '../dist/services/Logger.js';
 const GUILD = '111111111111111111';
 const USER = '222222222222222222';
 const URL = `https://discord.com/api/v10/guilds/${GUILD}/bans/${USER}`;
-let token;
+let token, unexpectedRequest;
 
 beforeEach(() => {
   token = process.env.DISCORD_TOKEN;
   process.env.DISCORD_TOKEN = 'placeholder-test-token';
   // Every request must be explicitly mocked; no path may reach Discord.
-  mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected request'); });
+  unexpectedRequest = mock.fn(async () => { throw new Error('Unexpected request'); });
+  mock.method(globalThis, 'fetch', unexpectedRequest);
   mock.method(DiscordApi.logger, 'warn', () => {});
   mock.method(DiscordApi.logger, 'error', () => {});
 });
 
 afterEach(() => {
+  mock.timers.reset();
   mock.restoreAll();
   if (token === undefined) delete process.env.DISCORD_TOKEN;
   else process.env.DISCORD_TOKEN = token;
+  assert.equal(unexpectedRequest.mock.callCount(), 0, 'unexpected requests must fail even when the caller catches them');
 });
 
 test('ban requests carry bounded purge history, a safe audit reason, and a deadline', async () => {
@@ -114,6 +117,38 @@ test('a long rate limit returns a recovery deadline without an early retry or lo
   assert.equal(result.banState, 'unknown');
   assert.equal(result.retryAt, 1_060_000);
   assert.equal(request.mock.callCount(), 1);
+});
+
+test('repeated rate limits share one wait budget and never retry ahead of the server', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  const request = mock.method(globalThis, 'fetch', async () => Response.json({ retry_after: 3 }, { status: 429 }));
+  const pending = DiscordApi.softbanUnban(GUILD, USER);
+  // Flush response-body parsing before advancing the mocked clock.
+  await new Promise(setImmediate);
+  assert.equal(request.mock.callCount(), 1);
+  mock.timers.tick(2999);
+  await new Promise(setImmediate);
+  assert.equal(request.mock.callCount(), 1, 'the first retry must wait the full three seconds');
+  mock.timers.tick(1);
+  const result = await pending;
+  assert.equal(request.mock.callCount(), 2, 'the second delay exceeds the remaining two-second budget');
+  assert.equal(result.retryAt, 1_006_000);
+  assert.equal(result.banState, 'unknown');
+  assert.equal(result.unbanFailed, true);
+});
+
+test('missing unban permission stops retries and a failed lookup stays unknown', async () => {
+  const methods = [];
+  mock.method(globalThis, 'fetch', async (_url, init) => {
+    methods.push(init.method ?? 'GET');
+    if (init.method === 'DELETE') return Response.json({ code: 50013 }, { status: 403 });
+    throw new Error('lookup unavailable');
+  });
+  const result = await DiscordApi.softbanUnban(GUILD, USER);
+  assert.deepEqual(methods, ['DELETE', 'GET']);
+  assert.equal(result.unbanFailed, true);
+  assert.equal(result.banState, 'unknown');
+  assert.match(result.detail, /missing_perms http=403 code=50013/);
 });
 
 test('ban ownership accepts only a string reason from a successful lookup', async () => {

@@ -202,6 +202,12 @@ src/
 - `npm run start` - Start production server
 - `npm run register` - Register commands with Discord (see below)
 - `npm test` - Run the test suite
+- `npm run typecheck` - Check strict TypeScript types without writing build output
+- `npm run test:coverage` - Build and run offline tests with Node's built-in coverage report
+
+Coverage reports include loaded JavaScript modules under `dist/`, excluding tests and
+dependencies. The live login entry point is not imported; these numbers measure mocked
+local behavior, not a Discord gateway session. No additional coverage dependency is needed.
 
 ## Registering commands
 

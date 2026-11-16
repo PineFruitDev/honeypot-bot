@@ -60,11 +60,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  const requests = globalThis.fetch.mock.callCount();
   mock.restoreAll();
   EnforcementService.logger = originalLogger;
   await store.flush();
   GuildConfigStore.instance = null;
   await fs.rm(dir, { recursive: true, force: true });
+  assert.equal(requests, 0, 'enforcement uses mocked Discord methods only');
 });
 
 const run = () => EnforcementService.handleCatch({ guild, user, member, trigger: 'fixture post', source: 'message', correlationId: 'fixture-ref' });

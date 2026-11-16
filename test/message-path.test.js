@@ -41,9 +41,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await bot.stop();
+  const requests = globalThis.fetch.mock.callCount();
   mock.restoreAll();
   GuildConfigStore.instance = null;
   await fs.rm(dir, { recursive: true, force: true });
+  assert.equal(requests, 0, 'message handling uses mocked enforcement only');
 });
 
 test('a detected post is deleted, enforced, and refreshed in order with one correlation ID', async () => {
