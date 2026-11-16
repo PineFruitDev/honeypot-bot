@@ -75,12 +75,12 @@ const CONTENT_KEYS = new Set([
  */
 const HASH_SALT = randomUUID();
 
-const SECRET_PATTERNS: Array<{ pattern: RegExp; replace: string | ((...m: string[]) => string) }> = [
+const SECRET_PATTERNS: Array<{ pattern: RegExp; replace: (...m: string[]) => string }> = [
   // A bot token or a JWT: three base64url runs joined by dots. Length floors keep this off
   // version strings and file names.
   {
     pattern: /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/g,
-    replace: REDACTED
+    replace: () => REDACTED
   },
   // `Authorization: Bot <token>`, which is how the token reaches the REST calls, and the
   // shape most likely to show up in a thrown request error.
@@ -117,7 +117,7 @@ export function redact(input: string, env: NodeJS.ProcessEnv = process.env): str
   }
 
   for (const { pattern, replace } of SECRET_PATTERNS) {
-    output = output.replace(pattern, replace as (substring: string, ...args: unknown[]) => string);
+    output = output.replace(pattern, replace);
   }
 
   // Two patterns can land on the same credential, e.g. `Authorization: Bot <token>` is hit
@@ -261,7 +261,7 @@ function safeUrl(value: unknown): string | undefined {
     const url = new URL(value);
     return clean(`${url.origin}${url.pathname}`);
   } catch {
-    return clean(value.split('?')[0]);
+    return clean(value.split('?')[0] ?? '');
   }
 }
 

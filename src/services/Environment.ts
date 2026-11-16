@@ -18,14 +18,14 @@ import { Logger } from './Logger.js';
 export type NodeEnv = 'development' | 'production' | 'test';
 
 export interface BotConfig {
-  discordToken: string;
-  discordClientId: string;
-  nodeEnv: NodeEnv;
-  dataDir: string;
-  devGuildId?: string;
-  developerIds: string[];
-  isDevelopment: boolean;
-  isProduction: boolean;
+  readonly discordToken: string;
+  readonly discordClientId: string;
+  readonly nodeEnv: NodeEnv;
+  readonly dataDir: string;
+  readonly devGuildId?: string;
+  readonly developerIds: readonly string[];
+  readonly isDevelopment: boolean;
+  readonly isProduction: boolean;
 }
 
 /** One key, one reason, no value. */
@@ -153,10 +153,11 @@ function parseIdList(raw: string): ParseResult<string[]> {
 
 function parseNodeEnv(raw: string): ParseResult<NodeEnv> {
   const lowered = raw.toLowerCase();
-  if (!NODE_ENVS.includes(lowered as NodeEnv)) {
+  const value = NODE_ENVS.find(env => env === lowered);
+  if (value === undefined) {
     return { ok: false, reason: `is not one of ${NODE_ENVS.join(', ')}` };
   }
-  return { ok: true, value: lowered as NodeEnv, normalized: lowered };
+  return { ok: true, value, normalized: value };
 }
 
 function parseDataDir(raw: string): ParseResult<string> {
@@ -173,46 +174,46 @@ function parseDataDir(raw: string): ParseResult<string> {
  * The whole contract, in declaration order. Adding a value the bot depends on means adding
  * a line here, which is what keeps "validated once, at startup" true as the bot grows.
  */
-const SPECS: readonly ConfigKeySpec<unknown>[] = [
-  {
+const SPECS = {
+  discordToken: {
     key: 'DISCORD_TOKEN',
     secret: true,
     expected: 'the bot token from the Discord developer portal',
     parse: parseToken
   },
-  {
+  discordClientId: {
     key: 'DISCORD_CLIENT_ID',
     expected: 'the application ID from the Discord developer portal',
     parse: parseSnowflake
   },
-  {
+  nodeEnv: {
     key: 'NODE_ENV',
     default: 'production',
     expected: `one of ${NODE_ENVS.join(', ')}`,
     parse: parseNodeEnv
   },
-  {
+  dataDir: {
     key: 'DATA_DIR',
     default: 'data',
     expected: 'a directory path the bot can write to',
     parse: parseDataDir
   },
-  {
+  devGuildId: {
     key: 'DEV_GUILD_ID',
     default: '',
     expected: 'a test guild Discord ID, or empty',
-    parse: raw => raw ? parseSnowflake(raw) : { ok: true, value: undefined }
+    parse: (raw): ParseResult<string | undefined> => raw ? parseSnowflake(raw) : { ok: true, value: undefined }
   },
-  {
+  developerIds: {
     key: 'DEVELOPER_IDS',
     default: '',
     expected: 'a comma-separated list of Discord user IDs, or empty',
     parse: parseIdList
   }
-];
+} satisfies { [K in keyof Omit<BotConfig, 'isDevelopment' | 'isProduction'>]-?: ConfigKeySpec<BotConfig[K]> };
 
 /** The keys this module checks, in declaration order. */
-export const CONFIG_KEYS: readonly string[] = SPECS.map(spec => spec.key);
+export const CONFIG_KEYS: readonly string[] = Object.values(SPECS).map(spec => spec.key);
 
 export class Environment {
   private static logger = new Logger({ context: 'Environment' });
@@ -233,91 +234,74 @@ export class Environment {
     this.logger.info('validate - Validating configuration...');
 
     const problems: ConfigProblem[] = [];
-    const values = new Map<string, unknown>();
+    const discordToken = this.readKey(SPECS.discordToken, problems);
+    const discordClientId = this.readKey(SPECS.discordClientId, problems);
+    const nodeEnv = this.readKey(SPECS.nodeEnv, problems);
+    const dataDir = this.readKey(SPECS.dataDir, problems);
+    const devGuildId = this.readKey(SPECS.devGuildId, problems);
+    const developerIds = this.readKey(SPECS.developerIds, problems);
 
-    for (const spec of SPECS) {
-      const raw = process.env[spec.key];
-      const trimmed = typeof raw === 'string' ? raw.trim() : undefined;
-
-      // Whitespace-only counts as absent. A key present but blank is the usual shape of a
-      // half-filled .env, and treating it as set would push the failure into Discord's lap.
-      if (trimmed === undefined || trimmed.length === 0) {
-        if (spec.default === undefined) {
-          problems.push({ key: spec.key, reason: `is required but not set (${spec.expected})` });
-          continue;
-        }
-
-        const parsed = spec.parse(spec.default);
-        if (!parsed.ok) {
-          // A default that its own parser rejects is a bug in SPECS above, not in anyone's
-          // .env. Say so rather than resolve the key to undefined and boot anyway.
-          problems.push({
-            key: spec.key,
-            reason: 'has a built-in default that fails its own check, this is a bug in Environment.ts'
-          });
-          continue;
-        }
-
-        values.set(spec.key, parsed.value);
-        this.applyNormalized(spec, parsed.normalized ?? spec.default);
-        continue;
-      }
-
-      if (PLACEHOLDERS.has(trimmed.toLowerCase())) {
-        problems.push({
-          key: spec.key,
-          reason: `is still the placeholder from .env.example (${spec.expected})`
-        });
-        continue;
-      }
-
-      // A quoted value is almost always a copy-paste artefact: dotenv keeps the quotes when
-      // they are mismatched, and the resulting token fails authentication for no visible reason.
-      if (this.isQuoted(trimmed)) {
-        problems.push({
-          key: spec.key,
-          reason: `is wrapped in quotes, remove them (${spec.expected})`
-        });
-        continue;
-      }
-
-      const parsed = spec.parse(trimmed);
-      if (!parsed.ok) {
-        problems.push({ key: spec.key, reason: `${parsed.reason} (${spec.expected})` });
-        continue;
-      }
-
-      values.set(spec.key, parsed.value);
-      this.applyNormalized(spec, parsed.normalized ?? trimmed);
-    }
-
-    if (problems.length > 0) {
+    // All keys are read before failing, so callers still receive every problem at once.
+    // Required values are narrowed here instead of asserting types from an untyped map.
+    if (problems.length > 0 || discordToken === undefined || discordClientId === undefined ||
+        nodeEnv === undefined || dataDir === undefined || developerIds === undefined) {
       const error = new ConfigValidationError(problems);
       this.logger.error(`validate - ${error.message}`);
       throw error;
     }
 
-    const nodeEnv = values.get('NODE_ENV') as NodeEnv;
     const config: BotConfig = {
-      discordToken: values.get('DISCORD_TOKEN') as string,
-      discordClientId: values.get('DISCORD_CLIENT_ID') as string,
+      discordToken,
+      discordClientId,
       nodeEnv,
-      dataDir: values.get('DATA_DIR') as string,
-      devGuildId: values.get('DEV_GUILD_ID') as string | undefined,
-      developerIds: values.get('DEVELOPER_IDS') as string[],
+      dataDir,
+      devGuildId,
+      developerIds,
       isDevelopment: nodeEnv === 'development',
       isProduction: nodeEnv === 'production'
     };
 
     this.resolved = Object.freeze({
       ...config,
-      developerIds: Object.freeze([...config.developerIds]) as string[]
+      developerIds: Object.freeze([...config.developerIds])
     });
 
     this.logger.info('validate - Configuration valid');
     this.logResolved(this.resolved);
 
     return this.resolved;
+  }
+
+  /** Parse one key without losing the relationship between its parser and result type. */
+  private static readKey<T>(spec: ConfigKeySpec<T>, problems: ConfigProblem[]): T | undefined {
+    const trimmed = process.env[spec.key]?.trim();
+    // Blank values count as absent, including a partially completed environment file.
+    const absent = trimmed === undefined || trimmed.length === 0;
+    const raw = absent ? spec.default : trimmed;
+    if (raw === undefined) {
+      problems.push({ key: spec.key, reason: `is required but not set (${spec.expected})` });
+      return undefined;
+    }
+    if (!absent && PLACEHOLDERS.has(raw.toLowerCase())) {
+      problems.push({ key: spec.key, reason: `is still the placeholder from .env.example (${spec.expected})` });
+      return undefined;
+    }
+    if (!absent && this.isQuoted(raw)) {
+      problems.push({ key: spec.key, reason: `is wrapped in quotes, remove them (${spec.expected})` });
+      return undefined;
+    }
+    const parsed = spec.parse(raw);
+    if (!parsed.ok) {
+      problems.push({
+        key: spec.key,
+        reason: absent
+          ? 'has a built-in default that fails its own check, this is a bug in Environment.ts'
+          : `${parsed.reason} (${spec.expected})`
+      });
+      return undefined;
+    }
+    this.applyNormalized(spec, parsed.normalized ?? raw);
+    return parsed.value;
   }
 
   /**

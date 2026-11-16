@@ -123,10 +123,12 @@ export class DiscordApi {
     let message: string | undefined;
     let retryAfter: number | undefined;
     try {
-      const body = (await res.json()) as { code?: number; message?: string; retry_after?: number };
-      if (typeof body?.code === 'number') code = body.code;
-      if (typeof body?.message === 'string') message = body.message.slice(0, 200);
-      if (typeof body?.retry_after === 'number' && Number.isFinite(body.retry_after) && body.retry_after > 0) retryAfter = body.retry_after;
+      const body: unknown = await res.json();
+      if (typeof body === 'object' && body !== null) {
+        if ('code' in body && typeof body.code === 'number') code = body.code;
+        if ('message' in body && typeof body.message === 'string') message = body.message.slice(0, 200);
+        if ('retry_after' in body && typeof body.retry_after === 'number' && Number.isFinite(body.retry_after) && body.retry_after > 0) retryAfter = body.retry_after;
+      }
     } catch {
       // Empty or non-JSON body. The status alone still beats a bare "error".
     }
@@ -179,8 +181,9 @@ export class DiscordApi {
         signal: AbortSignal.timeout(10000), headers: this.authHeaders()
       });
       if (!res.ok) return null;
-      const body = await res.json() as { reason?: unknown };
-      return typeof body.reason === 'string' ? body.reason : null;
+      const body: unknown = await res.json();
+      return typeof body === 'object' && body !== null && 'reason' in body && typeof body.reason === 'string'
+        ? body.reason : null;
     } catch { return null; }
   }
 
