@@ -435,9 +435,9 @@ export class EnforcementService {
     try {
       await member.timeout(SEVEN_DAYS_MS, reason);
       return 'success';
-    } catch (error: any) {
+    } catch (error) {
       this.logger.error(`timeoutMember - Failed for ${member.id}:`, error);
-      return error?.code === 50013 ? 'missing_perms' : 'error';
+      return isMissingPermissions(error) ? 'missing_perms' : 'error';
     }
   }
 
@@ -470,9 +470,9 @@ export class EnforcementService {
         return 'error';
       }
       return 'success';
-    } catch (error: any) {
+    } catch (error) {
       this.logger.error(`quarantineMember - Failed for ${member.id}:`, error);
-      return error?.code === 50013 ? 'missing_perms' : 'error';
+      return isMissingPermissions(error) ? 'missing_perms' : 'error';
     }
   }
 
@@ -558,7 +558,7 @@ export class EnforcementService {
     }
     const channel = guild.channels.cache.get(config.logChannelId);
     if (!channel || channel.type !== ChannelType.GuildText) return null;
-    return channel as TextChannel;
+    return channel;
   }
 
   /**
@@ -615,6 +615,11 @@ export class EnforcementService {
   public static missingPermissionsFor(guild: Guild, action: HoneypotAction): string[] {
     return missingGuildPermissions(guild, permissionsForAction(action));
   }
+}
+
+/** Discord may reject with an Error, a plain API error, or a non-object transport failure. */
+function isMissingPermissions(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 50013;
 }
 
 /** When was this account created, read out of the snowflake? Null if it is not one. */

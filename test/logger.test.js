@@ -341,6 +341,27 @@ test('a circular object is logged rather than throwing', () => {
   assert.ok(formatArg(guild, {}).includes(GUILD));
 });
 
+test('an argument whose serializer throws cannot interrupt error reporting', () => {
+  const { logger, lines } = capturing();
+  const diagnostic = { toJSON() { throw new Error('private fixture payload'); } };
+  assert.doesNotThrow(() => logger.error('action failed', diagnostic, { guildId: GUILD }));
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].line.includes('action failed'));
+  assert.ok(lines[0].line.includes(GUILD));
+  assert.ok(!lines[0].line.includes('private fixture payload'));
+  assert.match(lines[0].line, /unserializable/);
+});
+
+test('a field getter that throws cannot swallow the surrounding log entry', () => {
+  const { logger, lines } = capturing();
+  const diagnostic = { get value() { throw new Error('private fixture payload'); } };
+  assert.doesNotThrow(() => logger.child({ guildId: GUILD, diagnostic }).warn('action failed'));
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].line.includes(GUILD));
+  assert.ok(!lines[0].line.includes('private fixture payload'));
+  assert.match(lines[0].line, /unserializable/);
+});
+
 test('an undefined argument does not add a stray token to the line', () => {
   const { logger, lines } = capturing();
 

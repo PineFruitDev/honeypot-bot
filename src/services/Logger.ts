@@ -75,12 +75,12 @@ const CONTENT_KEYS = new Set([
  */
 const HASH_SALT = randomUUID();
 
-const SECRET_PATTERNS: Array<{ pattern: RegExp; replace: string | ((...m: string[]) => string) }> = [
+const SECRET_PATTERNS: Array<{ pattern: RegExp; replace: (...m: string[]) => string }> = [
   // A bot token or a JWT: three base64url runs joined by dots. Length floors keep this off
   // version strings and file names.
   {
     pattern: /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/g,
-    replace: REDACTED
+    replace: () => REDACTED
   },
   // `Authorization: Bot <token>`, which is how the token reaches the REST calls, and the
   // shape most likely to show up in a thrown request error.
@@ -117,7 +117,7 @@ export function redact(input: string, env: NodeJS.ProcessEnv = process.env): str
   }
 
   for (const { pattern, replace } of SECRET_PATTERNS) {
-    output = output.replace(pattern, replace as (substring: string, ...args: unknown[]) => string);
+    output = output.replace(pattern, replace);
   }
 
   // Two patterns can land on the same credential, e.g. `Authorization: Bot <token>` is hit
@@ -177,24 +177,30 @@ function compactFields(fields: LogContext): LogContext {
 export function formatArg(value: unknown, env: NodeJS.ProcessEnv = process.env): string {
   let rendered: string;
 
-  if (value instanceof Error) {
-    rendered = JSON.stringify({ error: serializeError(value) });
-  } else if (typeof value === 'string') {
-    rendered = value;
-  } else if (typeof value === 'object' && value !== null) {
-    const seen = new WeakSet<object>();
-    rendered =
-      JSON.stringify(value, (key, inner) => {
-        if (CONTENT_KEYS.has(key)) return describeContent(inner);
-        if (typeof inner === 'object' && inner !== null) {
-          if (seen.has(inner)) return '<circular>';
-          seen.add(inner);
-        }
-        if (typeof inner === 'bigint') return inner.toString();
-        return inner;
-      }) ?? String(value);
-  } else {
-    rendered = String(value);
+  try {
+    if (value instanceof Error) {
+      rendered = JSON.stringify({ error: serializeError(value) });
+    } else if (typeof value === 'string') {
+      rendered = value;
+    } else if (typeof value === 'object' && value !== null) {
+      const seen = new WeakSet<object>();
+      rendered =
+        JSON.stringify(value, (key, inner) => {
+          if (CONTENT_KEYS.has(key)) return describeContent(inner);
+          if (typeof inner === 'object' && inner !== null) {
+            if (seen.has(inner)) return '<circular>';
+            seen.add(inner);
+          }
+          if (typeof inner === 'bigint') return inner.toString();
+          return inner;
+        }) ?? String(value);
+    } else {
+      rendered = String(value);
+    }
+  } catch {
+    // Error reporting must survive a diagnostic object's throwing getter or toJSON.
+    // Do not serialize the failure itself: it can contain the very payload we dropped.
+    rendered = '<unserializable>';
   }
 
   return redact(rendered, env);
@@ -261,7 +267,7 @@ function safeUrl(value: unknown): string | undefined {
     const url = new URL(value);
     return clean(`${url.origin}${url.pathname}`);
   } catch {
-    return clean(value.split('?')[0]);
+    return clean(value.split('?')[0] ?? '');
   }
 }
 
@@ -357,8 +363,13 @@ function isErrorLike(value: unknown): boolean {
 export function formatFields(fields: LogFields): string {
   const cleaned: LogFields = {};
   for (const [key, value] of Object.entries(fields)) {
-    const next = CONTENT_KEYS.has(key) ? describeContent(value) : cleanFieldValue(value);
-    if (next !== undefined) cleaned[key] = next;
+    try {
+      const next = CONTENT_KEYS.has(key) ? describeContent(value) : cleanFieldValue(value);
+      if (next !== undefined) cleaned[key] = next;
+    } catch {
+      // Keep the remaining correlation fields when one diagnostic value is unreadable.
+      cleaned[key] = '[unserializable]';
+    }
   }
   if (!Object.keys(cleaned).length) return '';
   try {

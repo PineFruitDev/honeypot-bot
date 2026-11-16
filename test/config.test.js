@@ -103,6 +103,15 @@ test('a token short enough to be a truncated paste is rejected', () => {
   assert.match(error.message, /DISCORD_TOKEN: is too short/);
 });
 
+test('embedded whitespace and invalid token characters fail without echoing the input', () => {
+  for (const value of [FAKE_TOKEN.replace('.', '.\t'), `${FAKE_TOKEN}!`]) {
+    const error = expectFailure(validEnv({ DISCORD_TOKEN: value }));
+    assert.deepEqual(error.keys, ['DISCORD_TOKEN']);
+    assert.ok(!error.message.includes(value));
+    Environment.reset();
+  }
+});
+
 test('a "Bot " prefix on the token is called out specifically', () => {
   const error = expectFailure(validEnv({ DISCORD_TOKEN: `Bot ${FAKE_TOKEN}` }));
   assert.match(error.message, /DISCORD_TOKEN: has a "Bot " prefix/);
@@ -166,6 +175,45 @@ test('NODE_ENV is normalized and drives the derived flags', () => {
   assert.equal(config.isDevelopment, true);
   assert.equal(config.isProduction, false);
   assert.equal(process.env.NODE_ENV, 'development', 'direct readers see the normalized value');
+});
+
+test('test mode resolves independently of development and production', () => {
+  setEnv(validEnv({ NODE_ENV: ' TEST ' }));
+  const config = Environment.getConfig();
+  assert.equal(config.nodeEnv, 'test');
+  assert.equal(config.isDevelopment, false);
+  assert.equal(config.isProduction, false);
+});
+
+test('blank optional values default while the validated token is trimmed without rewriting it', () => {
+  setEnv(validEnv({
+    DISCORD_TOKEN: ` ${FAKE_TOKEN} `, NODE_ENV: '\t', DATA_DIR: ' ', DEV_GUILD_ID: '', DEVELOPER_IDS: ' '
+  }));
+  const config = Environment.validate();
+  assert.equal(config.discordToken, FAKE_TOKEN);
+  assert.equal(process.env.DISCORD_TOKEN, ` ${FAKE_TOKEN} `);
+  assert.equal(config.nodeEnv, 'production');
+  assert.equal(config.dataDir, 'data');
+  assert.equal(config.devGuildId, undefined);
+  assert.deepEqual(config.developerIds, []);
+});
+
+test('failed validation is not cached and can recover after every problem is corrected', () => {
+  const error = expectFailure(validEnv({ NODE_ENV: 'invalid', DEV_GUILD_ID: 'invalid' }));
+  assert.deepEqual(error.keys, ['NODE_ENV', 'DEV_GUILD_ID']);
+  setEnv(validEnv({ NODE_ENV: 'development', DEV_GUILD_ID: DEV_ID }));
+  const config = Environment.validate();
+  assert.equal(config.nodeEnv, 'development');
+  assert.equal(config.devGuildId, DEV_ID);
+  assert.equal(Environment.getConfig(), config);
+});
+
+test('developer permissions cannot be changed by mutating the resolved config array', () => {
+  setEnv(validEnv({ DEVELOPER_IDS: DEV_ID }));
+  const config = Environment.validate();
+  assert.ok(Object.isFrozen(config.developerIds));
+  assert.throws(() => config.developerIds.push(CLIENT_ID), TypeError);
+  assert.deepEqual(Environment.getConfig().developerIds, [DEV_ID]);
 });
 
 test('DEV_GUILD_ID is optional and validates a supplied test guild', () => {

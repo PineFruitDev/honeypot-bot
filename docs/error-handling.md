@@ -65,6 +65,9 @@ and the offender DM. A report that states a guess as a fact stops being believed
 
 `Logger` is the only way anything reaches the console.
 
+- A diagnostic argument or nested field whose getter or serializer throws is replaced
+  with an `unserializable` marker. The surrounding log entry and correlation fields
+  survive, so logging that failure cannot interrupt the catch record or staff report.
 - Errors are never logged whole. `serializeError` keeps an allowlist (`name`, `message`,
   `code`, `status`, `method`, `url`, `syscall`, `errno`, a trimmed stack, bounded nested
   `cause`) and drops everything else, which is where credentials live: `fetch` and

@@ -173,7 +173,8 @@ export class GuildConfigStore {
         ['message', 'button'].includes(r.source) && typeof r.caughtAt === 'string' && Number.isFinite(Date.parse(r.caughtAt))))) throw new Error('Invalid catches');
     }
     for (const [id, total] of Object.entries(this.totals)) {
-      if (!Object.hasOwn(this.data.guilds, id) || !Number.isSafeInteger(total) || total < (this.data.guilds[id].catches?.length ?? 0)) throw new Error('Invalid total');
+      const guild = this.data.guilds[id];
+      if (!Object.hasOwn(this.data.guilds, id) || !guild || !Number.isSafeInteger(total) || total < (guild.catches?.length ?? 0)) throw new Error('Invalid total');
     }
   }
 

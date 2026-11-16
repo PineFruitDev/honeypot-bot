@@ -124,6 +124,12 @@ test('a URL keeps its path and loses its query string', () => {
   assert.ok(!JSON.stringify(serialized).includes('secret-value'));
 });
 
+test('a malformed URL still strips its query before it reaches a log', () => {
+  const serialized = serializeError({ url: '/invalid url?credential=fixture-value' });
+  assert.equal(serialized.url, '/invalid url');
+  assert.ok(!JSON.stringify(serialized).includes('fixture-value'));
+});
+
 test('a nested cause is serialized through the same allowlist', () => {
   const error = new Error('fetch failed', {
     cause: Object.assign(new Error('connect ECONNREFUSED'), {
