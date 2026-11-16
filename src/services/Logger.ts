@@ -177,24 +177,30 @@ function compactFields(fields: LogContext): LogContext {
 export function formatArg(value: unknown, env: NodeJS.ProcessEnv = process.env): string {
   let rendered: string;
 
-  if (value instanceof Error) {
-    rendered = JSON.stringify({ error: serializeError(value) });
-  } else if (typeof value === 'string') {
-    rendered = value;
-  } else if (typeof value === 'object' && value !== null) {
-    const seen = new WeakSet<object>();
-    rendered =
-      JSON.stringify(value, (key, inner) => {
-        if (CONTENT_KEYS.has(key)) return describeContent(inner);
-        if (typeof inner === 'object' && inner !== null) {
-          if (seen.has(inner)) return '<circular>';
-          seen.add(inner);
-        }
-        if (typeof inner === 'bigint') return inner.toString();
-        return inner;
-      }) ?? String(value);
-  } else {
-    rendered = String(value);
+  try {
+    if (value instanceof Error) {
+      rendered = JSON.stringify({ error: serializeError(value) });
+    } else if (typeof value === 'string') {
+      rendered = value;
+    } else if (typeof value === 'object' && value !== null) {
+      const seen = new WeakSet<object>();
+      rendered =
+        JSON.stringify(value, (key, inner) => {
+          if (CONTENT_KEYS.has(key)) return describeContent(inner);
+          if (typeof inner === 'object' && inner !== null) {
+            if (seen.has(inner)) return '<circular>';
+            seen.add(inner);
+          }
+          if (typeof inner === 'bigint') return inner.toString();
+          return inner;
+        }) ?? String(value);
+    } else {
+      rendered = String(value);
+    }
+  } catch {
+    // Error reporting must survive a diagnostic object's throwing getter or toJSON.
+    // Do not serialize the failure itself: it can contain the very payload we dropped.
+    rendered = '<unserializable>';
   }
 
   return redact(rendered, env);
@@ -357,8 +363,13 @@ function isErrorLike(value: unknown): boolean {
 export function formatFields(fields: LogFields): string {
   const cleaned: LogFields = {};
   for (const [key, value] of Object.entries(fields)) {
-    const next = CONTENT_KEYS.has(key) ? describeContent(value) : cleanFieldValue(value);
-    if (next !== undefined) cleaned[key] = next;
+    try {
+      const next = CONTENT_KEYS.has(key) ? describeContent(value) : cleanFieldValue(value);
+      if (next !== undefined) cleaned[key] = next;
+    } catch {
+      // Keep the remaining correlation fields when one diagnostic value is unreadable.
+      cleaned[key] = '[unserializable]';
+    }
   }
   if (!Object.keys(cleaned).length) return '';
   try {

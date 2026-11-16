@@ -239,6 +239,33 @@ test('a thrown ban adapter becomes a failed report and no success DM', async () 
   assert.equal(reports.length, 1);
 });
 
+test('an unserializable rejection still reaches the catch record and staff report', async () => {
+  member.timeout = async () => {
+    throw { toJSON() { throw new Error('private fixture payload'); } };
+  };
+  const outcome = await run();
+  assert.equal(outcome.result, 'error');
+  assert.equal(recordedAction(), 'none');
+  assert.equal(reports.length, 1);
+  assert.deepEqual(effects, []);
+  assert.ok(logs.some(line => line.includes('timeoutMember - Failed')));
+  assert.ok(logs.every(line => !line.includes('private fixture payload')));
+});
+
+test('unserializable history failure cannot prevent reporting an already completed ban', async () => {
+  await store.patchGuild(GUILD, { action: 'ban' });
+  mock.method(store, 'recordCatch', async () => {
+    throw { toJSON() { throw new Error('private fixture payload'); } };
+  });
+  const outcome = await run();
+  assert.equal(outcome.result, 'success');
+  assert.equal(outcome.action, 'ban');
+  assert.deepEqual(effects, ['ban', 'dm']);
+  assert.equal(reports.length, 1);
+  assert.ok(logs.some(line => line.includes('catch history could not be saved')));
+  assert.ok(logs.every(line => !line.includes('private fixture payload')));
+});
+
 test('staff alerts skip non-text channels and absorb send failures', async () => {
   channel.type = ChannelType.GuildVoice;
   await EnforcementService.alertStaff(guild, { title: 'Test', description: 'Fixture' });
